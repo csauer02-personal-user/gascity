@@ -1218,11 +1218,24 @@ func sourceChainRootIDs(roots []beads.Bead) string {
 	return strings.Join(ids, ",")
 }
 
+// sourceCompletedCloseReason is stamped on a workflow source bead closed by the
+// completion path when no reason was recorded by anything upstream of it. Every
+// close carries a non-empty close_reason so a closed bead is never a bare fact
+// (same contract CloseWorkflowSubtreeAs and the run-cancel path already honor).
+const sourceCompletedCloseReason = "workflow source completed: step work reached a terminal state"
+
 func closeSourceBeadPreservingOutcome(store beads.Store, bead beads.Bead) error {
 	status := "closed"
 	opts := beads.UpdateOpts{Status: &status}
+	metadata := map[string]string{}
 	if strings.TrimSpace(bead.Metadata[beadmeta.OutcomeMetadataKey]) == "" {
-		opts.Metadata = map[string]string{beadmeta.OutcomeMetadataKey: beadmeta.OutcomePass}
+		metadata[beadmeta.OutcomeMetadataKey] = beadmeta.OutcomePass
+	}
+	if strings.TrimSpace(bead.Metadata["close_reason"]) == "" {
+		metadata["close_reason"] = sourceCompletedCloseReason
+	}
+	if len(metadata) > 0 {
+		opts.Metadata = metadata
 	}
 	return store.Update(bead.ID, opts)
 }

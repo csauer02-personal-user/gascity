@@ -36,6 +36,17 @@ const (
 	attemptContinue
 )
 
+// Close reasons stamped on control-plane closes. Every close carries a
+// non-empty close_reason so a closed bead is never a bare fact — the contract
+// CloseWorkflowSubtreeAs and the run-cancel path already honor; these attempt
+// sites predated it and closed reason-less.
+const (
+	attemptPassedCloseReason    = "control closed: attempt passed"
+	attemptHardFailCloseReason  = "control closed: attempt hard-failed"
+	retriesExhaustedCloseReason = "control closed: retries exhausted"
+	retriesSoftFailCloseReason  = "control closed: retries exhausted, soft-fail disposition releases dependents"
+)
+
 // attemptEvaluation is the strategy-produced classification of a closed
 // attempt/iteration bead: its disposition plus the values recorded in the
 // attempt log and (for hard/exhaust closures) the failure reason.
@@ -150,6 +161,7 @@ func processAttemptControl(store beads.Store, bead beads.Bead, opts ProcessOptio
 		closeMetadata := map[string]string{
 			beadmeta.AttemptLogMetadataKey: attemptLog,
 			beadmeta.OutcomeMetadataKey:    beadmeta.OutcomePass,
+			"close_reason":                 attemptPassedCloseReason,
 		}
 		clearControllerSpawnErrorMetadata(closeMetadata)
 		if outputJSON := attempt.Metadata[beadmeta.OutputJSONMetadataKey]; outputJSON != "" {
@@ -175,6 +187,7 @@ func processAttemptControl(store beads.Store, bead beads.Bead, opts ProcessOptio
 			beadmeta.FailureClassMetadataKey:     beadmeta.FailureClassHard,
 			beadmeta.FailureReasonMetadataKey:    eval.reason,
 			beadmeta.FinalDispositionMetadataKey: beadmeta.DispositionHardFail,
+			"close_reason":                       attemptHardFailCloseReason,
 		}
 		clearControllerSpawnErrorMetadata(closeMetadata)
 		if err := updateMetadataAndClose(store, bead.ID, closeMetadata); err != nil {
@@ -509,6 +522,7 @@ func handleRetryExhaustion(store beads.Store, beadID string, attemptNum int, rea
 			beadmeta.FailureClassMetadataKey:     beadmeta.FailureClassTransient,
 			beadmeta.FailureReasonMetadataKey:    reason,
 			beadmeta.FinalDispositionMetadataKey: beadmeta.DispositionSoftFail,
+			"close_reason":                       retriesSoftFailCloseReason,
 		}
 		clearControllerSpawnErrorMetadata(closeMetadata)
 		if err := updateMetadataAndClose(store, beadID, closeMetadata); err != nil {
@@ -524,6 +538,7 @@ func handleRetryExhaustion(store beads.Store, beadID string, attemptNum int, rea
 		beadmeta.FailureClassMetadataKey:     beadmeta.FailureClassTransient,
 		beadmeta.FailureReasonMetadataKey:    reason,
 		beadmeta.FinalDispositionMetadataKey: beadmeta.DispositionHardFail,
+		"close_reason":                       retriesExhaustedCloseReason,
 	}
 	clearControllerSpawnErrorMetadata(closeMetadata)
 	if err := updateMetadataAndClose(store, beadID, closeMetadata); err != nil {
