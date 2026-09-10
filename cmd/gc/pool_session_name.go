@@ -142,7 +142,7 @@ func releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(
 	openSessionInfos []session.Info,
 	result DesiredStateResult,
 	rigStores map[string]beads.Store,
-	protectedWakeWork map[string]struct{},
+	protectedWakeWork map[storeScopedBeadKey]struct{},
 ) []releasedPoolAssignment {
 	// Partial input snapshots can make active work look orphaned for this
 	// tick only: missing work affects drain decisions, and missing sessions
@@ -153,26 +153,41 @@ func releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(
 	return releaseOrphanedPoolAssignments(store, sessionStore, cfg, cityPath, openSessionInfos, result.AssignedWorkBeads, result.AssignedWorkStores, result.AssignedWorkStoreRefs, rigStores, protectedWakeWork)
 }
 
-// protectedWakeWorkIDs indexes the wake-candidate slice by bead ID for the
-// release arm's retain check. The release pass runs BEFORE the wake arm inside
-// one reconcile tick, over the same pre-tick session snapshot; work the wake
-// arm is about to act on must not be judged orphaned by the arm that ran first
-// (retain rather than reap). Without this, a release in the snapshot-staleness
-// window also removes the work from the tick's wake demand, the session
-// reconciler then retires the now-workless slot it just created, and the
-// reopened work re-creates demand next tick — a wake/release/retire treadmill
-// (observed live 12x on one identity).
-func protectedWakeWorkIDs(wakeCandidates []beads.Bead) map[string]struct{} {
+// protectedWakeWorkKeys indexes the wake-candidate slice by store ref + bead ID
+// for the release arm's retain check. The release pass runs BEFORE the wake arm
+// inside one reconcile tick, over the same pre-tick session snapshot; work the
+// wake arm is about to act on must not be judged orphaned by the arm that ran
+// first (retain rather than reap). Without this, a release in the
+// snapshot-staleness window also removes the work from the tick's wake demand,
+// the session reconciler then retires the now-workless slot it just created,
+// and the reopened work re-creates demand next tick — a wake/release/retire
+// treadmill (observed live 12x on one identity).
+//
+// AssignedWorkBeads can carry the same bead ID from independent city and rig
+// stores (storeScopedBeadKey), so a plain-ID key would let a wake candidate in
+// one store shield a genuinely orphaned same-ID bead in another.
+// wakeCandidateStoreRefs is the second return of
+// filterAssignedWorkBeadsForSessionWake and is index-aligned with
+// wakeCandidates; an empty refs slice means the caller had no refs either, and
+// both sides then key under "".
+func protectedWakeWorkKeys(wakeCandidates []beads.Bead, wakeCandidateStoreRefs []string) map[storeScopedBeadKey]struct{} {
 	if len(wakeCandidates) == 0 {
 		return nil
 	}
-	ids := make(map[string]struct{}, len(wakeCandidates))
-	for _, wb := range wakeCandidates {
-		if id := strings.TrimSpace(wb.ID); id != "" {
-			ids[id] = struct{}{}
+	scoped := len(wakeCandidateStoreRefs) == len(wakeCandidates)
+	keys := make(map[storeScopedBeadKey]struct{}, len(wakeCandidates))
+	for i, wb := range wakeCandidates {
+		id := strings.TrimSpace(wb.ID)
+		if id == "" {
+			continue
 		}
+		ref := ""
+		if scoped {
+			ref = wakeCandidateStoreRefs[i]
+		}
+		keys[storeScopedBeadKey{StoreRef: ref, ID: id}] = struct{}{}
 	}
-	return ids
+	return keys
 }
 
 // releaseOrphanedPoolAssignments reopens active pool-routed work whose
@@ -199,7 +214,7 @@ func releaseOrphanedPoolAssignments(
 	assignedWorkStores []beads.Store,
 	assignedWorkStoreRefs []string,
 	rigStores map[string]beads.Store,
-	protectedWakeWork map[string]struct{},
+	protectedWakeWork map[storeScopedBeadKey]struct{},
 ) []releasedPoolAssignment {
 	if store == nil || cfg == nil || len(assignedWorkBeads) == 0 {
 		return nil
@@ -252,13 +267,17 @@ func releaseOrphanedPoolAssignments(
 		if wb.Status != "open" && wb.Status != "in_progress" {
 			continue
 		}
+		workStoreRef := ""
+		if storeRefAware {
+			workStoreRef = assignedWorkStoreRefs[i]
+		}
 		// Retain work the same tick's wake arm is about to act on: the release
 		// pass runs first over a pre-tick snapshot in which a replacement
 		// session bead may not exist yet, and releasing here both drops a live
 		// claim and starves the wake demand that would have protected the slot.
 		// Uncertainty about session materialization is not permission to reopen
 		// work (retain rather than reap, gc-ft31x).
-		if _, ok := protectedWakeWork[wb.ID]; ok {
+		if _, ok := protectedWakeWork[storeScopedBeadKey{StoreRef: workStoreRef, ID: wb.ID}]; ok {
 			continue
 		}
 		assignee := strings.TrimSpace(wb.Assignee)
@@ -282,10 +301,6 @@ func releaseOrphanedPoolAssignments(
 				continue
 			}
 		} else {
-			workStoreRef := ""
-			if storeRefAware {
-				workStoreRef = assignedWorkStoreRefs[i]
-			}
 			if openSessionOwnsWork(legacyOpenIdentifiers, openIdentifiers, assignee, workStoreRef, storeRefAware) {
 				continue
 			}
