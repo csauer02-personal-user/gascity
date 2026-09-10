@@ -196,8 +196,9 @@ func lintPack(packDir string, siblingPackDirs []string) lintPackReport {
 	out.Diagnostics = append(out.Diagnostics, lintFormulaFiles(packDir)...)
 	targets, diagnostics := collectLintPromptTargets(packDir, loaded)
 	out.Diagnostics = append(out.Diagnostics, diagnostics...)
+	packDirs := mergePackDirs(loaded.PackDirs, siblingPackDirs)
 	for _, target := range targets {
-		out.Diagnostics = append(out.Diagnostics, lintPrompt(packDir, mergePackDirs(loaded.PackDirs, siblingPackDirs), loaded.Providers, target)...)
+		out.Diagnostics = append(out.Diagnostics, lintPrompt(packDir, packDirs, loaded.Providers, target)...)
 	}
 	out.Diagnostics = append(out.Diagnostics, lintClaudeOverlayHookShape(packDir)...)
 	out.OK = lintErrorCount(out.Diagnostics) == 0

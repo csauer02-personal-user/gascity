@@ -69,6 +69,7 @@ const shellSeparators = "|;&"
 func splitShellSegments(line string) []string {
 	var segments []string
 	var current strings.Builder
+	var sub strings.Builder
 	var quote rune
 	subDepth := 0 // inside $(...) command substitution
 	runes := []rune(line)
@@ -78,17 +79,27 @@ func splitShellSegments(line string) []string {
 		// it, not to the invocation that embeds it: `--metadata "$(jq -cn
 		// ...)"` must not attribute -cn to bd. Substitution is live inside
 		// double quotes but not single quotes, matching the shell. The body
-		// is dropped entirely — its command is outside this package's
-		// manifest anyway, and dropping keeps tokens AFTER the closing paren
-		// attributed to the outer invocation. A line ending mid-substitution
-		// (backslash continuation) drops the remainder, the same accepted
-		// line-oriented scope boundary documented on ScanUnknownFlags.
+		// becomes its own segment rather than joining the outer one, so a
+		// typo'd bd flag inside $(...) stays visible while tokens AFTER the
+		// closing paren stay attributed to the outer invocation. A line
+		// ending mid-substitution (backslash continuation) still yields the
+		// partial body as a segment, the same accepted line-oriented scope
+		// boundary documented on ScanUnknownFlags.
 		if subDepth > 0 {
 			switch r {
 			case '(':
 				subDepth++
+				sub.WriteRune(r)
 			case ')':
 				subDepth--
+				if subDepth == 0 {
+					segments = append(segments, sub.String())
+					sub.Reset()
+				} else {
+					sub.WriteRune(r)
+				}
+			default:
+				sub.WriteRune(r)
 			}
 			continue
 		}
@@ -116,6 +127,11 @@ func splitShellSegments(line string) []string {
 		default:
 			current.WriteRune(r)
 		}
+	}
+	if sub.Len() > 0 {
+		// Unterminated body (the line ended mid-substitution): scan what we
+		// have rather than losing it.
+		segments = append(segments, sub.String())
 	}
 	return append(segments, current.String())
 }
