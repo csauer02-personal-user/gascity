@@ -126,6 +126,29 @@ func TestIsWorkRecordGatedBead(t *testing.T) {
 		},
 		{name: "convoy bead is not gated", bead: beads.Bead{Type: "convoy"}, want: false},
 		{name: "message bead is not gated", bead: beads.Bead{Type: "message"}, want: false},
+		// An operator's own gc.kind is not one of the engine's, so it does not
+		// take a work bead out of the contract.
+		{
+			name: "operator work kind is gated",
+			bead: beads.Bead{Type: "task", Metadata: map[string]string{beadmeta.KindMetadataKey: "work"}},
+			want: true,
+		},
+		{
+			name: "operator review kind is gated",
+			bead: beads.Bead{Metadata: map[string]string{beadmeta.KindMetadataKey: "review"}},
+			want: true,
+		},
+	}
+	for _, kind := range beadmeta.EngineKinds {
+		tests = append(tests, struct {
+			name string
+			bead beads.Bead
+			want bool
+		}{
+			name: "engine kind " + kind + " is not gated",
+			bead: beads.Bead{Type: "task", Metadata: map[string]string{beadmeta.KindMetadataKey: kind}},
+			want: false,
+		})
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -197,6 +220,7 @@ func TestEvaluateWorkRecordCloseGate(t *testing.T) {
 		{ID: "wr-atomic-noop", Type: "task", Status: "in_progress", Metadata: map[string]string{}},
 		{ID: "wr-missing", Type: "task", Status: "in_progress", Metadata: map[string]string{}},
 		{ID: "wr-control", Type: "task", Status: "in_progress", Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow}},
+		{ID: "wr-operator-kind", Type: "task", Status: "in_progress", Metadata: map[string]string{beadmeta.KindMetadataKey: "work", beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeShipped}},
 	}
 	newStore := func() beads.Store { return beads.NewMemStoreFrom(1, beadsList, nil) }
 
@@ -209,6 +233,7 @@ func TestEvaluateWorkRecordCloseGate(t *testing.T) {
 	}{
 		{"non-close subcommand is ignored", []string{"show", "wr-shipped-nocommit"}, true, false, ""},
 		{"control bead is exempt", []string{"close", "wr-control"}, true, false, ""},
+		{"operator gc.kind does not exempt a shipped-no-commit close", []string{"close", "wr-operator-kind"}, true, true, "close of wr-operator-kind"},
 		{"no-op close passes", []string{"close", "wr-noop"}, true, false, ""},
 		{"shipped-no-commit warns only by default", []string{"close", "wr-shipped-nocommit"}, false, false, "work-record gate (warn-only)"},
 		{"shipped-no-commit blocks when enforced", []string{"close", "wr-shipped-nocommit"}, true, true, "work-record gate (enforced)"},
