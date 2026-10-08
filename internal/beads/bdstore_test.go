@@ -4978,44 +4978,88 @@ func TestBdStoreCreateOmitsEphemeralFlagByDefault(t *testing.T) {
 	}
 }
 
-func TestBdStoreListWispsUsesBdListWithClientTierFilter(t *testing.T) {
+// The wisp tier is read as its two halves with bd query and never with a bd
+// list of the whole store: on a large store a bd list --status=closed --all
+// reads tens of thousands of issue rows to keep a few wisps.
+func TestBdStoreListWispsReadsBothHalvesWithBdQuery(t *testing.T) {
 	var calls []string
 	runner := func(_, name string, args ...string) ([]byte, error) {
 		gotCmd := name + " " + strings.Join(args, " ")
 		calls = append(calls, gotCmd)
-		if strings.HasPrefix(gotCmd, "bd query ") {
+		switch {
+		case strings.HasPrefix(gotCmd, "bd query ") && strings.Contains(gotCmd, "no_history=true"):
+			return []byte(`[
+				{"id":"bd-nh","title":"no-history","status":"open","issue_type":"task","created_at":"2026-05-01T00:00:01Z","no_history":true,"labels":["order-tracking"]}
+			]`), nil
+		case strings.HasPrefix(gotCmd, "bd query "):
 			return []byte(`[
 				{"id":"bd-w","title":"wisp","status":"open","issue_type":"task","created_at":"2026-05-01T00:00:02Z","ephemeral":true,"labels":["order-tracking"]}
 			]`), nil
 		}
-		return []byte(`[
-			{"id":"bd-i","title":"issue","status":"open","issue_type":"task","created_at":"2026-05-01T00:00:00Z","labels":["order-tracking"]},
-			{"id":"bd-nh","title":"no-history","status":"open","issue_type":"task","created_at":"2026-05-01T00:00:01Z","no_history":true,"labels":["order-tracking"]}
-		]`), nil
+		t.Fatalf("unexpected command %q: the wisp tier reads with bd query only", gotCmd)
+		return nil, nil
 	}
 	s := beads.NewBdStore("/city", runner)
 	got, err := s.List(beads.ListQuery{Label: "order-tracking", TierMode: beads.TierWisps})
 	if err != nil {
 		t.Fatal(err)
 	}
-	gotCmd := firstCommandWithPrefix(calls, "bd list ")
-	if !strings.HasPrefix(gotCmd, "bd list --json ") {
-		t.Fatalf("cmd = %q, want bd list prefix", gotCmd)
+	var sawNoHistory, sawEphemeral bool
+	for _, c := range calls {
+		sawNoHistory = sawNoHistory || strings.Contains(c, "no_history=true AND label=order-tracking")
+		sawEphemeral = sawEphemeral || strings.Contains(c, "ephemeral=true AND label=order-tracking")
 	}
-	if strings.Contains(gotCmd, "--include-ephemeral") {
-		t.Fatalf("cmd = %q, bd list does not support --include-ephemeral", gotCmd)
-	}
-	if !strings.Contains(gotCmd, "--include-templates") {
-		t.Fatalf("cmd = %q, want --include-templates for wisp-aware list", gotCmd)
-	}
-	if !strings.Contains(gotCmd, "--label=order-tracking") {
-		t.Fatalf("cmd = %q, want label flag", gotCmd)
-	}
-	if queryCmd := firstCommandWithPrefix(calls, "bd query "); !strings.Contains(queryCmd, "ephemeral=true AND label=order-tracking") {
-		t.Fatalf("calls = %#v, want matching bd query ephemeral read", calls)
+	if !sawNoHistory || !sawEphemeral {
+		t.Fatalf("calls = %#v, want a no_history and an ephemeral bd query, each with the label", calls)
 	}
 	if len(got) != 2 || got[0].ID != "bd-nh" || got[1].ID != "bd-w" || !got[0].NoHistory || !got[1].Ephemeral {
 		t.Fatalf("got = %+v, want no-history and ephemeral rows only", got)
+	}
+}
+
+// A bd whose query language has no no_history field refuses the expression;
+// the no-history half then falls back to the bd list read it used before.
+func TestBdStoreListWispsFallsBackToBdListWhenBdLacksNoHistoryField(t *testing.T) {
+	var calls []string
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		gotCmd := name + " " + strings.Join(args, " ")
+		calls = append(calls, gotCmd)
+		switch {
+		case strings.HasPrefix(gotCmd, "bd query ") && strings.Contains(gotCmd, "no_history=true"):
+			return nil, fmt.Errorf("exit status 1: invalid query expression: unknown field: no_history")
+		case strings.HasPrefix(gotCmd, "bd query "):
+			return []byte(`[]`), nil
+		}
+		return []byte(`[
+			{"id":"bd-i","title":"issue","status":"open","issue_type":"task","created_at":"2026-05-01T00:00:00Z"},
+			{"id":"bd-nh","title":"no-history","status":"open","issue_type":"task","created_at":"2026-05-01T00:00:01Z","no_history":true}
+		]`), nil
+	}
+	s := beads.NewBdStore("/city", runner)
+	got, err := s.List(beads.ListQuery{Status: "open", TierMode: beads.TierWisps})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if firstCommandWithPrefix(calls, "bd list ") == "" {
+		t.Fatalf("calls = %#v, want the bd list fallback after bd refused no_history", calls)
+	}
+	if len(got) != 1 || got[0].ID != "bd-nh" {
+		t.Fatalf("got = %+v, want only the no-history row", got)
+	}
+
+	// The refusal is latched: a second read on the same store goes straight
+	// to the bd list read and does not ask bd for no_history again.
+	calls = nil
+	if _, err := s.List(beads.ListQuery{Status: "open", TierMode: beads.TierWisps}); err != nil {
+		t.Fatalf("second List: %v", err)
+	}
+	for _, c := range calls {
+		if strings.Contains(c, "no_history=true") {
+			t.Fatalf("second read asked bd for no_history again after it refused: %q", c)
+		}
+	}
+	if firstCommandWithPrefix(calls, "bd list ") == "" {
+		t.Fatalf("calls = %#v, want the latched bd list read", calls)
 	}
 }
 
@@ -5040,9 +5084,10 @@ func TestBdStoreListWispsRequestsUnlimitedResultsByDefault(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	gotCmd := firstCommandWithPrefix(calls, "bd list ")
-	if !strings.Contains(gotCmd, "--limit 0") {
-		t.Fatalf("cmd = %q, want explicit --limit 0 so bd list does not apply its default page size", gotCmd)
+	for _, gotCmd := range calls {
+		if !strings.HasPrefix(gotCmd, "bd query ") || !strings.Contains(gotCmd, "--limit 0") {
+			t.Fatalf("cmd = %q, want bd query with explicit --limit 0 so bd does not apply its default page size", gotCmd)
+		}
 	}
 	if len(got) != 55 {
 		t.Fatalf("got %d wisps, want all 55 rows", len(got))
@@ -5073,9 +5118,10 @@ func TestBdStoreListWispsAppliesMetadataBeforeClientLimit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	gotCmd := firstCommandWithPrefix(calls, "bd list ")
-	if !strings.Contains(gotCmd, "--limit 0") {
-		t.Fatalf("wisps query = %q, want --limit 0 before client-side metadata filtering", gotCmd)
+	for _, gotCmd := range calls {
+		if !strings.Contains(gotCmd, "--limit 0") {
+			t.Fatalf("wisps query = %q, want --limit 0 before client-side metadata filtering", gotCmd)
+		}
 	}
 	if len(got) != 1 || got[0].ID != "bd-old" {
 		t.Fatalf("got = %+v, want metadata-matching wisp after client filter then Limit", got)
@@ -5087,7 +5133,7 @@ func TestBdStoreListWispsReturnsPartialRowsWithErrorOnCorruptEntries(t *testing.
 		out []byte
 		err error
 	}{
-		`bd list --json --include-infra --include-gates --include-templates --limit 0`: {
+		`bd query --json no_history=true --limit 0`: {
 			out: []byte(`[
 				{"id":"bd-good","title":"good","status":"open","issue_type":"task","created_at":"2026-05-01T00:00:00Z","ephemeral":true},
 				{"id":"bd-bad","title":"bad","status":"open","issue_type":"task","created_at":"not-a-time","ephemeral":true}
@@ -5422,8 +5468,8 @@ func TestBdStoreListWispAwareTiersTolerateAdaptersWithoutBdQuery(t *testing.T) {
 }
 
 // TestBdStoreListWispsFallsBackToClientFilteringForUnsafeQueryValues pins the
-// bd list storage-tier contract: bd list has no ephemeral-only flag, so wisp
-// reads use normal list flags and then filter the storage tier client-side.
+// bd query contract: a value that is not safe to put in a bd query expression
+// is left out of it, and the rows are filtered client-side instead.
 func TestBdStoreListWispsFallsBackToClientFilteringForUnsafeQueryValues(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -5464,15 +5510,8 @@ func TestBdStoreListWispsFallsBackToClientFilteringForUnsafeQueryValues(t *testi
 			if err != nil {
 				t.Fatalf("List: %v", err)
 			}
-			gotCmd := firstCommandWithPrefix(calls, "bd list ")
-			if !strings.Contains(gotCmd, "bd list --json") {
-				t.Fatalf("cmd = %q, want wisps bd list", gotCmd)
-			}
-			if strings.Contains(gotCmd, "--include-ephemeral") {
-				t.Fatalf("cmd = %q, bd list does not support --include-ephemeral", gotCmd)
-			}
-			if !strings.Contains(gotCmd, "--include-templates") {
-				t.Fatalf("cmd = %q, want --include-templates for wisp-aware list", gotCmd)
+			if listCmd := firstCommandWithPrefix(calls, "bd list "); listCmd != "" {
+				t.Fatalf("cmd = %q, the wisp tier reads with bd query only", listCmd)
 			}
 			queryCmd := firstCommandWithPrefix(calls, "bd query ")
 			switch tc.name {

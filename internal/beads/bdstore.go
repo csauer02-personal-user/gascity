@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -427,6 +428,11 @@ type BdStore struct {
 	idPrefix    string          // bead ID prefix owned by this store, without trailing "-"
 
 	listSkipLabelsEnabled bool // whether bd list may receive --skip-labels
+
+	// noHistoryQueryUnsupported records that this bd refused the bd query
+	// no_history field (or bd query itself), pinning the wisp tier's
+	// no-history half to the bd list read for the rest of the store's life.
+	noHistoryQueryUnsupported atomic.Bool
 
 	// relocatedClasses names the coordination classes this ledger does not
 	// serve. Empty on every city that keeps all classes on one store, which is
@@ -3025,10 +3031,14 @@ func bdServerQueryForAssignees(query ListQuery) (ListQuery, bool) {
 	}
 }
 
+// listWispsTier reads the wisp tier as its two halves, each with bd query: the
+// no-history rows and the ephemeral rows. Neither read returns the issues
+// table's rows, so a closed-status wisp read (the wisp gc's orphan reaper) no
+// longer lists every closed issue in the store to keep a few wisps.
 func (s *BdStore) listWispsTier(query ListQuery) ([]Bead, error) {
 	listQ := query
 	listQ.TierMode = TierWisps
-	listResult, listErr := s.listViaBDList(listQ)
+	listResult, listErr := s.listNoHistory(listQ)
 
 	ephemeralQ := query
 	ephemeralQ.TierMode = TierWisps
@@ -3037,12 +3047,40 @@ func (s *BdStore) listWispsTier(query ListQuery) ([]Bead, error) {
 	return mergeListTierResults(query, "bd list wisps tier", listResult, listErr, ephemeralResult, ephemeralErr)
 }
 
+// listNoHistory reads only no-history rows using `bd query "no_history=true AND
+// <filters>"`. A bd without bd query, or without its no_history field, gets the
+// bd list read instead, which returns every row the filters admit and keeps the
+// no-history ones Go-side. The refusal is latched on the store so a bd that
+// lacks the field costs one refused bd query per store, not one per read.
+func (s *BdStore) listNoHistory(query ListQuery) ([]Bead, error) {
+	if s.noHistoryQueryUnsupported.Load() {
+		return s.listViaBDList(query)
+	}
+	result, err := s.listWispPlane(query, "no_history")
+	if err != nil && (isBdQueryUnsupported(err) || isBdQueryNoHistoryUnsupported(err)) {
+		s.noHistoryQueryUnsupported.Store(true)
+		return s.listViaBDList(query)
+	}
+	return result, err
+}
+
 // listEphemeral reads only ephemeral rows using `bd query "ephemeral=true AND
 // <filters>"`. The installed bd list surface does not expose ephemeral rows, so
 // TierWisps and TierBoth must union this path with bd list results.
 func (s *BdStore) listEphemeral(query ListQuery) ([]Bead, error) {
+	result, err := s.listWispPlane(query, "ephemeral")
+	if err != nil && isBdQueryUnsupported(err) {
+		return nil, nil
+	}
+	return result, err
+}
+
+// listWispPlane reads the rows whose wisp flag (ephemeral or no_history) is
+// set, with the query's filters pushed into the bd query expression where
+// they are safe to interpolate.
+func (s *BdStore) listWispPlane(query ListQuery, flag string) ([]Bead, error) {
 	serverQuery, clientFilteredAssignees := bdServerQueryForAssignees(query)
-	clauses := []string{"ephemeral=true"}
+	clauses := []string{flag + "=true"}
 	serverFilteredOnly := !clientFilteredAssignees
 	clauses, serverFilteredOnly = appendBdQueryClause(clauses, serverFilteredOnly, "label", serverQuery.Label)
 	clauses, serverFilteredOnly = appendBdQueryClause(clauses, serverFilteredOnly, "status", serverQuery.Status)
@@ -3066,18 +3104,15 @@ func (s *BdStore) listEphemeral(query ListQuery) ([]Bead, error) {
 	// one unretried read on the hot tier-merge path.
 	out, err := s.runBDTransientRead(args...)
 	if err != nil {
-		if isBdQueryUnsupported(err) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("bd query (wisps): %w", err)
+		return nil, fmt.Errorf("bd query (wisps, %s): %w", flag, err)
 	}
 	issues, parseErr := parseIssuesTolerant(extractJSON(out))
 	s.noteServerRows(len(issues))
 	result := make([]Bead, len(issues))
 	for i := range issues {
 		result[i] = issues[i].toBead()
-		result[i].Ephemeral = true
-		result[i].NoHistory = false
+		result[i].Ephemeral = flag == "ephemeral"
+		result[i].NoHistory = flag == "no_history"
 	}
 	s.noteInlineDependencyProjection(issues, result)
 	filtered := applyListQuery(result, query)
@@ -3141,6 +3176,13 @@ func isBdQueryUnsupported(err error) bool {
 		strings.Contains(text, "unknown command \"query\"") ||
 		strings.Contains(text, "unknown subcommand query") ||
 		strings.Contains(text, "unknown command query")
+}
+
+// isBdQueryNoHistoryUnsupported reports a bd whose query language has no
+// no_history field (every bd before it was added): bd refuses the expression
+// with "unknown field: no_history".
+func isBdQueryNoHistoryUnsupported(err error) bool {
+	return err != nil && strings.Contains(strings.ToLower(err.Error()), "unknown field: no_history")
 }
 
 func canApplyWispsServerLimit(query ListQuery) bool {
