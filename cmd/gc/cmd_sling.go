@@ -144,7 +144,7 @@ Examples:
 	}
 	cmd.Flags().BoolVarP(&formula, "formula", "f", false, "treat argument as formula name")
 	cmd.Flags().BoolVar(&nudge, "nudge", false, "nudge target after routing")
-	cmd.Flags().BoolVar(&force, "force", false, "suppress warnings, allow cross-rig routing, allow formulas v2 workflow replacement, and for direct bead routes dispatch even if the bead does not resolve in the local store")
+	cmd.Flags().BoolVar(&force, "force", false, "suppress warnings, allow cross-rig routing, allow formulas v2 workflow replacement, move a bead already routed to another target, and for direct bead routes dispatch even if the bead does not resolve in the local store")
 	cmd.Flags().StringVarP(&title, "title", "t", "", "wisp root bead title (with --formula or --on)")
 	cmd.Flags().StringArrayVar(&vars, "var", nil, "variable substitution for formula (key=value, repeatable)")
 	cmd.Flags().StringVar(&merge, "merge", "", "merge strategy: direct, mr, or local")

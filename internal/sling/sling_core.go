@@ -726,7 +726,9 @@ func slingPlainBead(opts SlingOpts, deps SlingDeps, beadID string, result SlingR
 // finalize executes the sling command, records telemetry, sets merge
 // metadata, creates auto-convoy, pokes the controller, and signals nudge.
 func finalize(opts SlingOpts, deps SlingDeps, beadID, method string, result SlingResult) (SlingResult, error) {
-	err := inputOwnership(deps, opts.Target).WithDirect(context.Background(), beadID, func() error {
+	owner := inputOwnership(deps, opts.Target)
+	owner.MoveRoute = opts.Force
+	err := owner.WithDirect(context.Background(), beadID, func() error {
 		var innerErr error
 		result, innerErr = finalizeWithInputLock(opts, deps, beadID, method, result)
 		return innerErr
@@ -2044,7 +2046,9 @@ func DoSlingBatch(opts SlingOpts, deps SlingDeps, querier BeadChildQuerier) (Sli
 
 		childEnv := ResolveSlingEnvForBead(a, deps, child)
 		rigDir := SlingDirForBead(deps.Cfg, deps.CityPath, child.ID)
-		routeErr := inputOwnership(deps, a).WithDirect(context.Background(), child.ID, func() error {
+		owner := inputOwnership(deps, a)
+		owner.MoveRoute = opts.Force
+		routeErr := owner.WithDirect(context.Background(), child.ID, func() error {
 			if deps.Router != nil {
 				if err := validateBuiltInRouteStoreReachable(deps, child.ID, a); err != nil {
 					return err

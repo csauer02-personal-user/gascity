@@ -21,6 +21,10 @@ const workflowInputOwnerPrefix = "workflow:"
 type InputOwnership struct {
 	Work, Graph                 beads.Store
 	CityPath, LockScope, Target string
+	// MoveRoute lets WithDirect replace a live route to another target
+	// (sling --force). Without it a direct route never takes work that is
+	// routed to, or claimed through, a different target.
+	MoveRoute bool
 }
 
 // WithWorkflow reserves the live members of inputConvoyID before launch and
@@ -253,14 +257,20 @@ func (o InputOwnership) reserveDirectInputRoute(id string) (func() error, error)
 	if err != nil {
 		return nil, err
 	}
+	target := o.Target
+	previous := current.Metadata[beadmeta.RoutedToMetadataKey]
+	// The same rule the workflow side applies: a different live route is
+	// never stolen. Checked under the input lock, so two direct slings to
+	// different targets cannot both pass.
+	if route := strings.TrimSpace(previous); !o.MoveRoute && route != "" && route != target && !convoycore.IsTerminalStatus(current.Status) {
+		return nil, fmt.Errorf("bead %s is already routed to %q (assignee=%q status=%q); rerun with --force to move it to %q", id, route, current.Assignee, current.Status, target)
+	}
 	writer, ok := beads.ConditionalWriterFor(o.Work)
 	if !ok {
 		// Direct routing on legacy stores remains supported. The shared input
 		// lock fences GC graph launches; those still require assignment CAS.
 		return func() error { return nil }, nil
 	}
-	target := o.Target
-	previous := current.Metadata[beadmeta.RoutedToMetadataKey]
 	if err := writer.UpdateIfMatch(id, current.Revision, beads.UpdateOpts{Metadata: map[string]string{beadmeta.RoutedToMetadataKey: target}}); err != nil {
 		return nil, fmt.Errorf("reserving direct input route %s: %w", id, err)
 	}
