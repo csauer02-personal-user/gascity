@@ -72,7 +72,16 @@ func ValidOutcome(v string) bool {
 // scope/run/check/drain steps, etc.) or non-task beads (convoy, message). Those
 // use the disjoint control-plane gc.outcome vocabulary and are closed by the
 // dispatch engine, not by a worker reporting a work outcome.
+//
+// It also does not apply to a no-history or ephemeral bead. Those are records
+// the runtime writes for itself, such as an order's tracking bead
+// (internal/orders CreateRun writes it NoHistory with no type and no gc.kind),
+// and no worker ever reports a work outcome on them, so refusing their close
+// only leaves them open.
 func Gated(bead beads.Bead) bool {
+	if bead.NoHistory || bead.Ephemeral {
+		return false
+	}
 	if t := strings.TrimSpace(bead.Type); t != "" && t != "task" {
 		return false
 	}

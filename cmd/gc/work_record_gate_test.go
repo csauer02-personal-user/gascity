@@ -406,6 +406,66 @@ func TestEvaluateWorkRecordCloseGateUsesPreFetchedBead(t *testing.T) {
 	}
 }
 
+// TestEvaluateWorkRecordCloseGateSkipsNoHistoryAndEphemeral pins that the
+// gate does not hold a bead the runtime writes for itself. An order's tracking
+// bead is created NoHistory with no type and no gc.kind (internal/orders
+// CreateRun), so before this rule the enforced gate read it as a worker task
+// and refused its close with "missing gc.work_outcome", leaving one open
+// tracking bead per order firing. An ephemeral (wisps-tier) bead is the same
+// class. A durable bead of the same shape must still be held, alone and in a
+// batch close beside the exempt one.
+func TestEvaluateWorkRecordCloseGateSkipsNoHistoryAndEphemeral(t *testing.T) {
+	tracking := beads.Bead{
+		ID:        "wr-order-tracking",
+		Title:     "order:archive-repack",
+		Status:    "open",
+		NoHistory: true,
+		Labels:    []string{"order-run:archive-repack", "order-tracking"},
+	}
+	ephemeral := beads.Bead{ID: "wr-ephemeral", Status: "open", Type: "task", Ephemeral: true}
+	durable := beads.Bead{ID: "wr-durable", Status: "in_progress", Type: "task"}
+	preFetched := map[string]beads.Bead{tracking.ID: tracking, ephemeral.ID: ephemeral, durable.ID: durable}
+
+	tests := []struct {
+		name      string
+		ids       []string
+		wantBlock bool
+		wantNamed []string
+		notNamed  []string
+	}{
+		{name: "no-history order tracking bead closes", ids: []string{tracking.ID}, notNamed: []string{tracking.ID}},
+		{name: "ephemeral bead closes", ids: []string{ephemeral.ID}, notNamed: []string{ephemeral.ID}},
+		{name: "durable task is still held", ids: []string{durable.ID}, wantBlock: true, wantNamed: []string{durable.ID}},
+		{
+			name:      "batch close holds only the durable task",
+			ids:       []string{tracking.ID, durable.ID},
+			wantBlock: true,
+			wantNamed: []string{durable.ID},
+			notNamed:  []string{tracking.ID},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var stderr strings.Builder
+			args := append([]string{"close"}, tc.ids...)
+			block := evaluateWorkRecordCloseGate(args, panicOnGetStore{}, preFetched, workRecordRepoDirs{legacy: t.TempDir()}, true, &stderr)
+			if block != tc.wantBlock {
+				t.Fatalf("block = %v, want %v; stderr=%q", block, tc.wantBlock, stderr.String())
+			}
+			for _, id := range tc.wantNamed {
+				if !strings.Contains(stderr.String(), "close of "+id+":") {
+					t.Fatalf("stderr does not name %s: %q", id, stderr.String())
+				}
+			}
+			for _, id := range tc.notNamed {
+				if strings.Contains(stderr.String(), id) {
+					t.Fatalf("stderr names %s, which the gate must not hold: %q", id, stderr.String())
+				}
+			}
+		})
+	}
+}
+
 // TestRunWorkRecordCloseGateReusesPreOpenedStore proves runWorkRecordCloseGate
 // never calls openStoreAtForCity when handed a preOpened store — it's the IO
 // wrapper's half of the dedup (evaluateWorkRecordCloseGate proves the
