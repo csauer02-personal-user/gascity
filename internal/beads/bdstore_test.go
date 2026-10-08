@@ -524,6 +524,111 @@ func TestBdStoreListUsesDecodedUpdatedAtForUpdatedBefore(t *testing.T) {
 	}
 }
 
+// The ready blocker check (filterReadyByWorkOutcome) lists closed blockers by
+// id. The ids go to bd as --id so the read is bounded by them; an IDs query
+// must never ask bd for the whole closed set and keep the ids in Go, which on
+// a large store reads tens of thousands of rows to find a handful.
+func TestBdStoreListRendersIDFilterServerSide(t *testing.T) {
+	var listCalls []string
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		if name != "bd" {
+			return nil, fmt.Errorf("unexpected command name %q", name)
+		}
+		joined := strings.Join(args, " ")
+		if len(args) > 0 && args[0] == "list" {
+			listCalls = append(listCalls, joined)
+			if !strings.Contains(joined, "--id bd-a,bd-b") {
+				return nil, fmt.Errorf("bd list without --id: %s", joined)
+			}
+			return []byte(`[
+				{"id":"bd-a","title":"a","status":"closed","issue_type":"task","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-02T00:00:00Z","metadata":{"gc.work_outcome":"blocked"}},
+				{"id":"bd-b","title":"b","status":"closed","issue_type":"task","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-02T00:00:00Z"}
+			]`), nil
+		}
+		return []byte(`[]`), nil
+	}
+	s := beads.NewBdStore("/city", runner)
+	got, err := s.List(beads.ListQuery{IDs: []string{"bd-b", "bd-a"}, TierMode: beads.TierBoth, Status: "closed"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("List(IDs) returned %d beads, want 2: %+v", len(got), got)
+	}
+	if len(listCalls) == 0 {
+		t.Fatal("no bd list call was made")
+	}
+	for _, call := range listCalls {
+		if !strings.Contains(call, "--id bd-a,bd-b") {
+			t.Fatalf("bd list call without a server-side id filter: %s", call)
+		}
+		if !strings.Contains(call, "--status=closed") || !strings.Contains(call, "--all") {
+			t.Fatalf("bd list call lost the closed-inclusive flags: %s", call)
+		}
+	}
+}
+
+// An IDs query too large for one argv string is split across bd list calls,
+// each carrying at most one chunk of the sorted, deduplicated ids, and the
+// rows of every chunk reach the caller.
+func TestBdStoreListSplitsLargeIDFilterAcrossCalls(t *testing.T) {
+	const total = 2500
+	ids := make([]string, 0, total+1)
+	for i := 0; i < total; i++ {
+		ids = append(ids, fmt.Sprintf("bd-%05d", i))
+	}
+	ids = append(ids, "bd-00000") // a duplicate must not be fetched twice
+	var idArgs []string
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		if name != "bd" || len(args) == 0 || args[0] != "list" {
+			return []byte(`[]`), nil
+		}
+		var idArg string
+		for i, a := range args {
+			if a == "--id" && i+1 < len(args) {
+				idArg = args[i+1]
+			}
+		}
+		if idArg == "" {
+			return nil, fmt.Errorf("bd list without --id: %s", strings.Join(args, " "))
+		}
+		idArgs = append(idArgs, idArg)
+		var rows []string
+		for _, id := range strings.Split(idArg, ",") {
+			rows = append(rows, fmt.Sprintf(`{"id":%q,"title":"t","status":"closed","issue_type":"task","created_at":"2026-01-01T00:00:00Z"}`, id))
+		}
+		return []byte("[" + strings.Join(rows, ",") + "]"), nil
+	}
+	s := beads.NewBdStore("/city", runner)
+	got, err := s.List(beads.ListQuery{IDs: ids, Status: "closed"})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(idArgs) != 3 {
+		t.Fatalf("bd list calls = %d, want 3 chunks for %d ids", len(idArgs), total)
+	}
+	seen := make(map[string]int, total)
+	for _, arg := range idArgs {
+		if n := len(strings.Split(arg, ",")); n > 1000 {
+			t.Fatalf("one --id argument carries %d ids, want at most 1000", n)
+		}
+		for _, id := range strings.Split(arg, ",") {
+			seen[id]++
+		}
+	}
+	if len(seen) != total {
+		t.Fatalf("--id arguments named %d distinct ids, want %d", len(seen), total)
+	}
+	for id, n := range seen {
+		if n != 1 {
+			t.Fatalf("id %s was sent in %d chunks, want 1", id, n)
+		}
+	}
+	if len(got) != total {
+		t.Fatalf("List returned %d beads, want %d", len(got), total)
+	}
+}
+
 func TestBdIssueToBeadFallsBackToMetadataFrom(t *testing.T) {
 	runner := fakeRunner(map[string]struct {
 		out []byte
@@ -2670,6 +2775,11 @@ func TestBdStoreReadyExcludesDependentWhenBlockerClosedAsWorkOutcomeBlocked(t *t
 		if !strings.Contains(args, "--all") {
 			t.Fatalf("blocker lookup %q is not closed-inclusive: want --all", args)
 		}
+		// The lookup names its blocker. Without --id it reads every closed
+		// row in the store to keep one.
+		if !strings.Contains(args, "--id bd-blocker") {
+			t.Fatalf("blocker lookup %q reads the whole closed set: want --id bd-blocker", args)
+		}
 	}
 }
 
@@ -3247,9 +3357,10 @@ func TestBdStoreListForcesUnboundedForIDs(t *testing.T) {
 		out []byte
 		err error
 	}{
-		`bd list --json --label=bounded-caller --include-infra --include-gates --limit 0`: {
+		// bd filters by id; the read stays unbounded (--limit 0) so a
+		// bd-side limit cannot cut a matching id.
+		`bd list --json --label=bounded-caller --id bd-b --include-infra --include-gates --limit 0`: {
 			out: []byte(`[
-				{"id":"bd-a","title":"a","status":"open","issue_type":"task","created_at":"2026-05-01T00:00:00Z","labels":["bounded-caller"]},
 				{"id":"bd-b","title":"b","status":"open","issue_type":"task","created_at":"2026-05-02T00:00:00Z","labels":["bounded-caller"]}
 			]`),
 		},
@@ -3260,7 +3371,7 @@ func TestBdStoreListForcesUnboundedForIDs(t *testing.T) {
 		t.Fatalf("List: %v", err)
 	}
 	if len(got) != 1 || got[0].ID != "bd-b" {
-		t.Fatalf("got = %+v, want single bd-b matched Go-side after unbounded fetch", got)
+		t.Fatalf("got = %+v, want single bd-b from an id-filtered unbounded fetch", got)
 	}
 }
 

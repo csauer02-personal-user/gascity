@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -2868,6 +2869,16 @@ func (s *BdStore) listViaBDList(query ListQuery) ([]Bead, error) {
 	if serverQuery.Type != "" {
 		args = append(args, "--type="+serverQuery.Type)
 	}
+	// An IDs query passes its ids to bd (bd list --id a,b,c) so bd reads
+	// only those rows. Without it the read returns every row the other
+	// filters admit — for the ready blocker check that is the store's whole
+	// closed set — and the ids are kept Go-side by applyListQuery. The value
+	// is filled per chunk below.
+	idArg := -1
+	if len(serverQuery.IDs) > 0 {
+		args = append(args, "--id", "")
+		idArg = len(args) - 1
+	}
 	if serverQuery.IncludeClosed || serverQuery.Status == "closed" {
 		args = append(args, "--all")
 	}
@@ -2896,11 +2907,22 @@ func (s *BdStore) listViaBDList(query ListQuery) ([]Bead, error) {
 		args = append(args, "--skip-labels")
 	}
 
-	out, err := s.runBDTransientRead(args...)
-	if err != nil {
-		return nil, fmt.Errorf("bd list: %w", err)
+	var (
+		issues   []bdIssue
+		parseErr error
+	)
+	for _, ids := range bdListIDChunks(serverQuery.IDs) {
+		if idArg >= 0 {
+			args[idArg] = ids
+		}
+		out, err := s.runBDTransientRead(args...)
+		if err != nil {
+			return nil, fmt.Errorf("bd list: %w", err)
+		}
+		chunk, chunkErr := parseIssuesTolerant(extractJSON(out))
+		issues = append(issues, chunk...)
+		parseErr = errors.Join(parseErr, chunkErr)
 	}
-	issues, parseErr := parseIssuesTolerant(extractJSON(out))
 	// Latched from what bd RETURNED, before applyListQuery: a store that
 	// answered with rows is the populated one, whatever this query's filters
 	// then reduce that to.
@@ -2925,6 +2947,30 @@ func (s *BdStore) listViaBDList(query ListQuery) ([]Bead, error) {
 	return filtered, nil
 }
 
+// bdListIDChunkSize bounds how many ids one bd list --id argument carries.
+// The ids travel as a single comma-joined argv string, and Linux refuses any
+// one argument over 128 KiB (MAX_ARG_STRLEN), so a large IDs query is split
+// across several bd list calls rather than failing to start bd at all.
+const bdListIDChunkSize = 1000
+
+// bdListIDChunks returns the comma-joined --id values for ids, sorted and
+// deduplicated so the argument vector is stable and no row is fetched by two
+// chunks, at most bdListIDChunkSize ids each. An empty ids slice yields one
+// empty chunk: the single bd list call with no --id.
+func bdListIDChunks(ids []string) []string {
+	if len(ids) == 0 {
+		return []string{""}
+	}
+	sorted := append([]string(nil), ids...)
+	sort.Strings(sorted)
+	sorted = slices.Compact(sorted)
+	chunks := make([]string, 0, (len(sorted)+bdListIDChunkSize-1)/bdListIDChunkSize)
+	for start := 0; start < len(sorted); start += bdListIDChunkSize {
+		chunks = append(chunks, strings.Join(sorted[start:min(start+bdListIDChunkSize, len(sorted))], ","))
+	}
+	return chunks
+}
+
 func bdListRequiresClientLimit(query, serverQuery ListQuery, clientFilteredAssignees bool) bool {
 	// TierWisps always merges two independently-fetched legs (this bd-list
 	// leg plus the ephemeral leg in listWispsTier) and needs full candidates
@@ -2947,9 +2993,9 @@ func bdListRequiresClientLimit(query, serverQuery ListQuery, clientFilteredAssig
 	if serverQuery.SeekAfter != nil {
 		return true
 	}
-	// IDs is a Go-side-only residual filter (see ListQuery.Matches): bd list
-	// has no --id flag, so a bd-side limit could truncate before the
-	// matching IDs are even fetched.
+	// IDs is passed to bd as --id, which already bounds the read; a bd-side
+	// limit on one --id chunk could still cut a matching id before the
+	// chunks are merged and ListQuery.Matches applies the caller's limit.
 	if len(serverQuery.IDs) > 0 {
 		return true
 	}
