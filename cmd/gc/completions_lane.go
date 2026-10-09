@@ -396,6 +396,11 @@ func (cr *CityRuntime) runCompletionsSweepChunk(backstop *executionevent.Complet
 	for _, listErr := range result.ListErrors {
 		fmt.Fprintf(cr.stderr, "%s: completions sweep: %v\n", cr.logPrefix, listErr) //nolint:errcheck // best-effort stderr
 	}
+	// A failed one-read step listing skips nothing: the store's roots are
+	// listed one at a time instead, and the line says the sweep paid for that.
+	for _, stepErr := range result.StepListErrors {
+		fmt.Fprintf(cr.stderr, "%s: completions sweep: %v; listing each root's steps on its own\n", cr.logPrefix, stepErr) //nolint:errcheck // best-effort stderr
+	}
 	total, done := lane.noteSweepChunk(time.Now(), reason, result.Emitted, result.RootsVisited, result.RootsSkippedConverged, result.SweepComplete)
 	if done {
 		summary := fmt.Sprintf("reason=%s converged %d root(s) (+%d already-converged skipped), emitted %d completion fact(s), took %s (stores=%d)",
