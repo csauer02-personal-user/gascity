@@ -110,6 +110,65 @@ func TestStartupSweepListsStepsOncePerStore(t *testing.T) {
 	}
 }
 
+// TestStartupSweepOfSettledRootsIsNotPacedByTheChunk: a root the one listing
+// settled costs a map lookup, so it is not charged to the chunk. Charging it
+// paced a converged city at one chunk interval per ChunkSize roots, about 70
+// minutes of waiting for about 9,000 roots that needed nothing. A converged
+// store larger than the chunk now finishes its startup sweep in one Pass.
+func TestStartupSweepOfSettledRootsIsNotPacedByTheChunk(t *testing.T) {
+	const n, chunk = 12, 5
+	backing, journal, _, stepIDs := convergedClosedCorpus(t, n)
+	store := &stepListingCountingStore{Store: backing}
+	stores := []beads.GraphStore{{Store: store}}
+
+	r := (&CompletionBackstop{VisitStamped: true, ChunkSize: chunk}).Pass(journal, stores, "execution-reconcile")
+	if !r.SweepComplete || r.RootsVisited != n || r.RootsSettled != n || r.Emitted != 0 {
+		t.Fatalf("startup sweep = %+v, want one complete Pass with all %d roots visited and settled", r, n)
+	}
+	if store.perRootLists != 0 || store.keyedLists != 1 {
+		t.Fatalf("startup sweep made %d per-root and %d one-read listing(s), want 0 and 1", store.perRootLists, store.keyedLists)
+	}
+
+	// Control: roots that still need their own listing are still capped by the
+	// chunk. Reopen-and-reclose more steps than the chunk holds, so those roots
+	// owe a fact the one listing cannot settle.
+	open, closed := "open", "closed"
+	const owed = chunk + 2
+	for i := range owed {
+		if err := backing.Update(stepIDs[i], beads.UpdateOpts{Status: &open}); err != nil {
+			t.Fatal(err)
+		}
+		if err := backing.Update(stepIDs[i], beads.UpdateOpts{
+			Status:   &closed,
+			Metadata: map[string]string{beadmeta.SessionIDMetadataKey: "gcs-resurrected"},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	store.perRootLists, store.keyedLists = 0, 0
+	backstop := &CompletionBackstop{VisitStamped: true, ChunkSize: chunk}
+	visited, settled, emitted, passes := 0, 0, 0, 0
+	for {
+		passes++
+		r := backstop.Pass(journal, stores, "execution-reconcile")
+		if listed := r.RootsVisited - r.RootsSettled; listed > chunk {
+			t.Fatalf("pass %d listed %d root(s) on their own, want at most the chunk size %d", passes, listed, chunk)
+		}
+		visited += r.RootsVisited
+		settled += r.RootsSettled
+		emitted += r.Emitted
+		if r.SweepComplete {
+			break
+		}
+	}
+	if passes != 2 || visited != n || settled != n-owed || emitted != owed {
+		t.Fatalf("startup sweep took %d pass(es), visited %d, settled %d, emitted %d; want 2, %d, %d, %d", passes, visited, settled, emitted, n, n-owed, owed)
+	}
+	if store.perRootLists != owed {
+		t.Fatalf("startup sweep made %d per-root listing(s), want %d (the owed roots only)", store.perRootLists, owed)
+	}
+}
+
 // TestStartupSweepRereadsOnlyRootsThatNeedAWrite: a root the one listing cannot
 // settle is read again by its own listing before anything is recorded or
 // written, so the fact and the stamp are still decided from rows read then.

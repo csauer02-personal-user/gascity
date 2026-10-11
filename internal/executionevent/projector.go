@@ -873,7 +873,9 @@ func (idx *CompletedFactIndex) add(key completedFactKey) {
 // last store's last root is visited, and the next Pass starts a fresh one: this
 // is a convergence scan, not a one-shot migration.
 type CompletionBackstop struct {
-	// ChunkSize caps the roots one Pass visits. Zero means the whole sweep.
+	// ChunkSize caps the roots one Pass lists on their own. A root that its
+	// store's one step listing settled (settledRoots) costs a map lookup, not a
+	// listing, and does not count against it. Zero means the whole sweep.
 	ChunkSize int
 
 	storeIndex  int
@@ -923,6 +925,9 @@ type CompletionBackstop struct {
 type CompletionBackstopResult struct {
 	Emitted      int
 	RootsVisited int
+	// RootsSettled counts the visited roots that their store's one step
+	// listing settled, so this chunk did not list them on their own.
+	RootsSettled int
 	// SweepComplete reports that this Pass finished a full traversal, so the
 	// cursor has wrapped and the next Pass begins a new sweep.
 	SweepComplete bool
@@ -948,7 +953,8 @@ type CompletionBackstopResult struct {
 	WarmFailed bool
 }
 
-// Pass visits at most ChunkSize roots, resuming from the last Pass's cursor.
+// Pass lists at most ChunkSize roots on their own, resuming from the last
+// Pass's cursor. Settled roots pass through the same chunk without counting.
 func (b *CompletionBackstop) Pass(recorder events.Provider, graphStores []beads.GraphStore, actor string) CompletionBackstopResult {
 	var result CompletionBackstopResult
 	if recorder == nil || len(graphStores) == 0 {
@@ -961,7 +967,7 @@ func (b *CompletionBackstop) Pass(recorder events.Provider, graphStores []beads.
 		return result
 	}
 	for b.storeIndex < len(graphStores) {
-		if b.ChunkSize > 0 && result.RootsVisited >= b.ChunkSize {
+		if b.ChunkSize > 0 && result.RootsVisited-result.RootsSettled >= b.ChunkSize {
 			return result
 		}
 		graphStore := graphStores[b.storeIndex]
@@ -991,15 +997,25 @@ func (b *CompletionBackstop) Pass(recorder events.Provider, graphStores []beads.
 		for len(remaining) > 0 && b.afterRootID != "" && remaining[0].ID <= b.afterRootID {
 			remaining = remaining[1:]
 		}
-		budget := len(remaining)
-		if b.ChunkSize > 0 {
-			if left := b.ChunkSize - result.RootsVisited; left < budget {
-				budget = left
+		// Only a root that still needs its own step listing is charged to the
+		// chunk. A startup sweep settles nearly every root with the one listing,
+		// and charging those too paced a converged city at one chunk interval
+		// per ChunkSize roots: about 9,000 roots took over an hour of waiting.
+		left := b.ChunkSize - (result.RootsVisited - result.RootsSettled)
+		end, settled := 0, 0
+		for ; end < len(remaining); end++ {
+			if _, ok := b.settledRoots[remaining[end].ID]; ok {
+				settled++
+				continue
+			}
+			if b.ChunkSize > 0 && end-settled >= left {
+				break
 			}
 		}
-		chunk := remaining[:budget]
+		chunk := remaining[:end]
 		result.Emitted += reconcileRoots(recorder, graphStore, chunk, b.settledRoots, &b.index, actor)
 		result.RootsVisited += len(chunk)
+		result.RootsSettled += settled
 		if len(chunk) > 0 {
 			b.afterRootID = chunk[len(chunk)-1].ID
 		}
