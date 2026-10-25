@@ -532,6 +532,7 @@ func (m *MemStore) readyLocked(ctx context.Context, q ReadyQuery) ([]Bead, error
 			continue
 		}
 		blocked := false
+		gated := WorkOutcomeGatesDependent(b)
 		for _, dep := range m.deps {
 			if err := contextErr(); err != nil {
 				return nil, err
@@ -544,7 +545,11 @@ func (m *MemStore) readyLocked(ctx context.Context, q ReadyQuery) ([]Bead, error
 			default:
 				continue
 			}
-			if !DependencySatisfied(statusByID[dep.DependsOnID], workOutcomeByID[dep.DependsOnID]) {
+			workOutcome := ""
+			if gated {
+				workOutcome = workOutcomeByID[dep.DependsOnID]
+			}
+			if !DependencySatisfied(statusByID[dep.DependsOnID], workOutcome) {
 				blocked = true
 				break
 			}

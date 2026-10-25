@@ -963,6 +963,53 @@ func RunStoreTestsWithOptions(t *testing.T, newStore func() beads.Store, opts Op
 		}
 	})
 
+	t.Run("ReadyIncludesControlWhenBlockerStepFailedWithWorkOutcomeBlocked", func(t *testing.T) {
+		s := newStore()
+		blocker, err := s.Create(beads.Bead{Title: "blocker", Type: "task"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		work, err := s.Create(beads.Bead{Title: "work", Type: "task"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		finalizer, err := s.Create(beads.Bead{
+			Title:    "finalizer",
+			Type:     "task",
+			Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflowFinalize},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.DepAdd(work.ID, blocker.ID, "blocks"); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.DepAdd(finalizer.ID, blocker.ID, "blocks"); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Close(blocker.ID); err != nil {
+			t.Fatal(err)
+		}
+		// A workflow step that failed (gc.outcome=fail) and whose worker
+		// recorded gc.work_outcome=blocked. No further work may start on it,
+		// but the finalizer is the bead that settles the failed workflow: if
+		// it is withheld, the workflow root never closes.
+		if err := s.SetMetadataBatch(blocker.ID, map[string]string{
+			beadmeta.StepRefMetadataKey:     "close-source-anchor",
+			beadmeta.OutcomeMetadataKey:     beadmeta.OutcomeFail,
+			beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		got, err := s.Ready()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != 1 || got[0].Title != "finalizer" {
+			t.Fatalf("Ready() = %v, want [finalizer]: a failed step with gc.work_outcome=blocked withholds further work but never the control bead that settles the workflow", titlesOf(got))
+		}
+	})
+
 	t.Run("ReadyExcludesDependentWhenWorkBeadPassedWithWorkOutcomeBlocked", func(t *testing.T) {
 		s := newStore()
 		blocker, err := s.Create(beads.Bead{Title: "blocker", Type: "task"})

@@ -875,6 +875,19 @@ func ReadinessWorkOutcome(metadata map[string]string) string {
 	return metadata[beadmeta.WorkOutcomeMetadataKey]
 }
 
+// WorkOutcomeGatesDependent reports whether a blocking dependency's
+// gc.work_outcome may withhold dependent from Ready. It may not when dependent
+// is a workflow control bead (beadmeta.IsControlKind). A finalizer, ralph,
+// retry or scope check reads its blockers' gc.outcome and settles the
+// workflow, a failure included. A worker that closes a failed step with
+// gc.work_outcome=blocked asks that no further work start on it, and the
+// control is not further work: withheld, it is never offered to the control
+// dispatcher, and the workflow root stays open with nothing left that can
+// close it.
+func WorkOutcomeGatesDependent(dependent Bead) bool {
+	return !beadmeta.IsControlKind(dependent.Metadata[beadmeta.KindMetadataKey])
+}
+
 // IsReadyExcludedType reports whether the bead type is excluded from
 // Ready() results by default.
 func IsReadyExcludedType(t string) bool {

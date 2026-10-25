@@ -223,6 +223,24 @@ func TestReadinessWorkOutcomeDefersToAPassedStep(t *testing.T) {
 	}
 }
 
+func TestWorkOutcomeGatesDependentExemptsControlBeads(t *testing.T) {
+	for _, kind := range beadmeta.ControlKinds {
+		dependent := Bead{Metadata: map[string]string{beadmeta.KindMetadataKey: kind}}
+		if WorkOutcomeGatesDependent(dependent) {
+			t.Errorf("WorkOutcomeGatesDependent(gc.kind=%s) = true, want false: a control bead settles its workflow from gc.outcome", kind)
+		}
+	}
+	for _, dependent := range []Bead{
+		{},
+		{Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindTask}},
+		{Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow}},
+	} {
+		if !WorkOutcomeGatesDependent(dependent) {
+			t.Errorf("WorkOutcomeGatesDependent(%v) = false, want true: a work dependent stays withheld by a blocked work outcome", dependent.Metadata)
+		}
+	}
+}
+
 func TestDependencySatisfied(t *testing.T) {
 	tests := []struct {
 		name           string

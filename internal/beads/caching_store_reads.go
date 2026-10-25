@@ -1170,9 +1170,13 @@ func cachedReadyDependencyStatusesKnown(b Bead, statusByID map[string]string, de
 }
 
 func cachedBeadReady(b Bead, statusByID, workOutcomeByID map[string]string, deps []Dep) bool {
+	gated := WorkOutcomeGatesDependent(b)
 	if b.IsBlocked != nil {
 		if *b.IsBlocked {
 			return false
+		}
+		if !gated {
+			return true
 		}
 		// bd's own false verdict already reflects its richer native gating
 		// semantics (e.g. a waits-for gate opened through bd-native state,
@@ -1206,7 +1210,11 @@ func cachedBeadReady(b Bead, statusByID, workOutcomeByID map[string]string, deps
 		if !ok {
 			continue
 		}
-		if !DependencySatisfied(status, workOutcomeByID[dep.DependsOnID]) {
+		workOutcome := ""
+		if gated {
+			workOutcome = workOutcomeByID[dep.DependsOnID]
+		}
+		if !DependencySatisfied(status, workOutcome) {
 			return false
 		}
 	}

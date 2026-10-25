@@ -3573,6 +3573,9 @@ func (s *BdStore) filterReadyByWorkOutcome(candidates []Bead) ([]Bead, error) {
 	}
 	depsByID := make(map[string][]Dep, len(candidates))
 	for _, c := range candidates {
+		if !WorkOutcomeGatesDependent(c) {
+			continue
+		}
 		depsByID[c.ID] = c.Dependencies
 	}
 	blockerIDSet := make(map[string]bool)

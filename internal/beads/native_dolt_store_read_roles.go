@@ -496,7 +496,13 @@ func (s *NativeDoltStore) filterReadyByWorkOutcome(ctx context.Context, storage 
 	}
 	ids := make([]string, 0, len(candidates))
 	for _, c := range candidates {
+		if !WorkOutcomeGatesDependent(c) {
+			continue
+		}
 		ids = append(ids, c.ID)
+	}
+	if len(ids) == 0 {
+		return candidates, nil
 	}
 	edgeReader, err := storage.EdgeReader()
 	if err != nil {

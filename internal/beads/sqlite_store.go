@@ -1749,11 +1749,16 @@ func sqliteReadySQL(q ReadyQuery, projection string) (string, []any) {
 // sqliteReadyBlockerExists is SQLite's one statement of "blocked": an EXISTS
 // over issueCol's blocks/waits-for/conditional-blocks edges whose target is not
 // closed, or closed with gc.work_outcome=blocked unless it is a formula step
-// (gc.step_ref) that passed (gc.outcome=pass). A target missing from this
-// store (deleted, or another store's id) has no status and so blocks. Ready
-// negates it and enrichReadyProjectionForCache selects it, so the store and a
-// cache over it cannot disagree about which rows are blocked.
+// (gc.step_ref) that passed (gc.outcome=pass) or issueCol is a workflow control
+// bead (WorkOutcomeGatesDependent). A target missing from this store (deleted,
+// or another store's id) has no status and so blocks. Ready negates it and
+// enrichReadyProjectionForCache selects it, so the store and a cache over it
+// cannot disagree about which rows are blocked.
 func sqliteReadyBlockerExists(issueCol string) string {
+	controlKinds := make([]string, 0, len(beadmeta.ControlKinds))
+	for _, kind := range beadmeta.ControlKinds {
+		controlKinds = append(controlKinds, "'"+kind+"'")
+	}
 	return fmt.Sprintf(`EXISTS (
 			SELECT 1 FROM deps d
 			LEFT JOIN beads blocker ON blocker.id=d.depends_on_id
@@ -1767,6 +1772,12 @@ func sqliteReadyBlockerExists(issueCol string) string {
 			           WHERE m.bead_id = blocker.id
 			             AND m.meta_key = '%s'
 			             AND m.meta_value = '%s'
+			         )
+			         AND NOT EXISTS (
+			           SELECT 1 FROM metadata k
+			           WHERE k.bead_id = d.issue_id
+			             AND k.meta_key = '%s'
+			             AND k.meta_value IN (%s)
 			         )
 			         AND NOT (
 			           EXISTS (
@@ -1784,7 +1795,7 @@ func sqliteReadyBlockerExists(issueCol string) string {
 			         )
 			       )
 			  )
-		  )`, issueCol, beadmeta.WorkOutcomeMetadataKey, beadmeta.WorkOutcomeBlocked, beadmeta.OutcomeMetadataKey, beadmeta.OutcomePass, beadmeta.StepRefMetadataKey)
+		  )`, issueCol, beadmeta.WorkOutcomeMetadataKey, beadmeta.WorkOutcomeBlocked, beadmeta.KindMetadataKey, strings.Join(controlKinds, ","), beadmeta.OutcomeMetadataKey, beadmeta.OutcomePass, beadmeta.StepRefMetadataKey)
 }
 
 // Children returns all non-closed beads whose ParentID matches the given ID.

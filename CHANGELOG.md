@@ -526,6 +526,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `events.jsonl`) when they are missing. Its footer now says so, in place of
   "No side effects executed".
 
+- **A failed step closed with `gc.work_outcome=blocked` no longer strands its
+  workflow.** The dependency veto kept every dependent out of `Ready`,
+  including the control beads (`workflow-finalize`, `ralph`, `retry`,
+  `scope-check` and the other control kinds) whose job is to read that
+  failure and settle the workflow. Never ready, the control was never offered
+  to the control dispatcher, and the workflow root stayed open with nothing
+  left that could close it; a drain waiting on that root never completed.
+  The veto now applies only to dependents that are not control beads, in
+  every store; plain work behind a blocked step is still withheld.
+
 - **The core `orphan-sweep` order times out a minute before its next run is
   due.** The order declared no timeout, so it ran under the 300s exec
   default, equal to its 5m interval. The cooldown counts from when a run
