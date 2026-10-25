@@ -536,6 +536,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The veto now applies only to dependents that are not control beads, in
   every store; plain work behind a blocked step is still withheld.
 
+- **A `ralph` or `retry` no longer runs a step again after its worker closed
+  it `gc.work_outcome=blocked`.** Once the control could run behind such a
+  step, it read any failure class other than `hard` as repairable and cloned
+  another iteration or attempt, up to `gc.max_attempts`. A step closed
+  `gc.outcome=fail` with `gc.work_outcome=blocked` is now a hard failure for
+  both, whatever its `gc.failure_class`: the control settles the step failed
+  and starts nothing more.
+
 - **The core `orphan-sweep` order times out a minute before its next run is
   due.** The order declared no timeout, so it ran under the 300s exec
   default, equal to its 5m interval. The cooldown counts from when a run

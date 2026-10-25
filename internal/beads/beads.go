@@ -880,10 +880,13 @@ func ReadinessWorkOutcome(metadata map[string]string) string {
 // is a workflow control bead (beadmeta.IsControlKind). A finalizer, ralph,
 // retry or scope check reads its blockers' gc.outcome and settles the
 // workflow, a failure included. A worker that closes a failed step with
-// gc.work_outcome=blocked asks that no further work start on it, and the
-// control is not further work: withheld, it is never offered to the control
-// dispatcher, and the workflow root stays open with nothing left that can
-// close it.
+// gc.work_outcome=blocked asks that no further work start on it. Withheld, the
+// control is never offered to the control dispatcher, and the workflow root
+// stays open with nothing left that can close it. Let through, a finalizer,
+// drain, fanout or scope check starts no further work, and a ralph or retry
+// reads the blocked work outcome as a hard failure (dispatch
+// closedWithHardFailure and classifyRetryAttempt), so it settles the step
+// failed and clones no further iteration or attempt.
 func WorkOutcomeGatesDependent(dependent Bead) bool {
 	return !beadmeta.IsControlKind(dependent.Metadata[beadmeta.KindMetadataKey])
 }
