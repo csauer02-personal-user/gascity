@@ -1010,6 +1010,52 @@ func RunStoreTestsWithOptions(t *testing.T, newStore func() beads.Store, opts Op
 		}
 	})
 
+	t.Run("ReadyExcludesWorkflowMembersWhileRootDeferred", func(t *testing.T) {
+		s := newStore()
+		future := time.Now().UTC().Add(time.Hour)
+		heldRoot, err := s.Create(beads.Bead{Title: "held root", Type: "task", DeferUntil: &future})
+		if err != nil {
+			t.Fatal(err)
+		}
+		liveRoot, err := s.Create(beads.Bead{Title: "live root", Type: "task"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		blocker, err := s.Create(beads.Bead{Title: "blocker", Type: "task"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		members := []beads.Bead{
+			{Title: "held step", Type: "task", Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: heldRoot.ID}},
+			{Title: "held finalizer", Type: "task", Metadata: map[string]string{
+				beadmeta.RootBeadIDMetadataKey: heldRoot.ID,
+				beadmeta.KindMetadataKey:       beadmeta.KindWorkflowFinalize,
+			}},
+			{Title: "live step", Type: "task", Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: liveRoot.ID}},
+		}
+		for _, m := range members {
+			created, err := s.Create(m)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := s.DepAdd(created.ID, blocker.ID, "blocks"); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := s.Close(blocker.ID); err != nil {
+			t.Fatal(err)
+		}
+		// Every member's blocker is closed. The members of the deferred root
+		// stay held, its control included; the live root's member is offered.
+		got, err := s.Ready()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := []string{"live root", "live step"}; !slices.Equal(titlesOf(got), want) {
+			t.Fatalf("Ready() = %v, want %v: a deferred workflow root holds its steps and controls out of Ready", titlesOf(got), want)
+		}
+	})
+
 	t.Run("ReadyExcludesDependentWhenWorkBeadPassedWithWorkOutcomeBlocked", func(t *testing.T) {
 		s := newStore()
 		blocker, err := s.Create(beads.Bead{Title: "blocker", Type: "task"})

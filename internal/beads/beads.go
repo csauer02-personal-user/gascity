@@ -891,6 +891,66 @@ func WorkOutcomeGatesDependent(dependent Bead) bool {
 	return !beadmeta.IsControlKind(dependent.Metadata[beadmeta.KindMetadataKey])
 }
 
+// WorkflowRootID returns the workflow root b names in gc.root_bead_id, or ""
+// when it names none or names itself.
+func WorkflowRootID(b Bead) string {
+	root := strings.TrimSpace(b.Metadata[beadmeta.RootBeadIDMetadataKey])
+	if root == b.ID {
+		return ""
+	}
+	return root
+}
+
+// WorkflowRootHolds reports whether root, the workflow root a bead names,
+// holds that bead out of Ready. A deferred root does (IsDeferred), with or
+// without a date: deferring a workflow root holds its steps and controls, so a
+// step whose blockers close is not offered while its root stays deferred.
+// bd's own deferred-parent rule does not cover this: it holds only the
+// parent-child children of a parent deferred to a future date, while a
+// workflow's members name their root in gc.root_bead_id and a hold is usually
+// undated. A root the store cannot find holds nothing.
+func WorkflowRootHolds(root Bead, now time.Time) bool {
+	return IsDeferred(root, now)
+}
+
+// FilterReadyByWorkflowRoot drops the candidates whose workflow root holds
+// them (WorkflowRootHolds). roots returns the beads it can find among the ids
+// it is given; it is called once, and only when some candidate names a root.
+func FilterReadyByWorkflowRoot(candidates []Bead, now time.Time, roots func(ids []string) ([]Bead, error)) ([]Bead, error) {
+	seen := make(map[string]bool)
+	var ids []string
+	for _, c := range candidates {
+		if root := WorkflowRootID(c); root != "" && !seen[root] {
+			seen[root] = true
+			ids = append(ids, root)
+		}
+	}
+	if len(ids) == 0 {
+		return candidates, nil
+	}
+	found, err := roots(ids)
+	if err != nil {
+		return nil, fmt.Errorf("checking workflow roots: %w", err)
+	}
+	held := make(map[string]bool, len(found))
+	for _, r := range found {
+		if WorkflowRootHolds(r, now) {
+			held[r.ID] = true
+		}
+	}
+	if len(held) == 0 {
+		return candidates, nil
+	}
+	result := make([]Bead, 0, len(candidates))
+	for _, c := range candidates {
+		if held[WorkflowRootID(c)] {
+			continue
+		}
+		result = append(result, c)
+	}
+	return result, nil
+}
+
 // IsReadyExcludedType reports whether the bead type is excluded from
 // Ready() results by default.
 func IsReadyExcludedType(t string) bool {

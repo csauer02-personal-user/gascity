@@ -544,6 +544,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   both, whatever its `gc.failure_class`: the control settles the step failed
   and starts nothing more.
 
+- **A deferred workflow root now holds its steps and controls out of
+  `Ready`.** Deferring a workflow's root, with or without a date, did not hold
+  the beads under it: they name their root in `gc.root_bead_id`, and bd holds
+  only the parent-child children of a parent deferred to a future date. A
+  step whose blockers closed was offered to the pool while its root stayed
+  deferred. Every store now leaves out a bead whose workflow root is
+  deferred, and offers it again when the root is undeferred.
+
 - **The core `orphan-sweep` order times out a minute before its next run is
   due.** The order declared no timeout, so it ran under the 300s exec
   default, equal to its 5m interval. The cooldown counts from when a run

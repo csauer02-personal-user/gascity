@@ -1708,6 +1708,12 @@ func (s *SQLiteStore) readyRows(ctx context.Context, q ReadyQuery) ([]Bead, erro
 	if err := contextErr(); err != nil {
 		return nil, err
 	}
+	result, err = FilterReadyByWorkflowRoot(result, now, func(ids []string) ([]Bead, error) {
+		return s.List(ListQuery{IDs: ids, TierMode: TierBoth})
+	})
+	if err != nil {
+		return nil, fmt.Errorf("listing sqlite ready beads: %w", err)
+	}
 	// Cut the Limit prefix only after the canonical sort, so a bounded read
 	// takes the same rows a cache-served read over this store takes (#3208).
 	if err := sortBeadsReadyOrderContext(ctx, result); err != nil {
