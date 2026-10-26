@@ -38,6 +38,7 @@ go_test(
     name = "dispatch_test",
     srcs = [
         "attempt_control_routing_test.go",
+        "blocked_work_outcome_test.go",
         "call_budget_test.go",
         "control_attempt_iteration_test.go",
         "control_for_lineage_test.go",
