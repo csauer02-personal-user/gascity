@@ -908,9 +908,13 @@ func WorkflowRootID(b Bead) string {
 // bd's own deferred-parent rule does not cover this: it holds only the
 // parent-child children of a parent deferred to a future date, while a
 // workflow's members name their root in gc.root_bead_id and a hold is usually
-// undated. A root the store cannot find holds nothing.
+// undated. An undated hold reads as IndefinitelyDeferred on the bd-backed
+// stores, which normalize bd's deferred status on read, and as a stored
+// status="deferred" on the stores that keep the status they are given
+// (MemStore, FileStore, SQLiteStore, exec). A root the store cannot find holds
+// nothing.
 func WorkflowRootHolds(root Bead, now time.Time) bool {
-	return IsDeferred(root, now)
+	return root.Status == "deferred" || IsDeferred(root, now)
 }
 
 // FilterReadyByWorkflowRoot drops the candidates whose workflow root holds

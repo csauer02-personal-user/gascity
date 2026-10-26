@@ -149,3 +149,46 @@ func TestCompiledRalphBlockedMemberEndsLoop(t *testing.T) {
 		})
 	}
 }
+
+// TestProcessRalphCheckBlockedSubjectEndsLoop is the KindCheck shape of a
+// ralph: its subject closed gc.outcome=fail and gc.work_outcome=blocked with a
+// class that is neither hard nor transient. The check settles the logical bead
+// failed in that attempt and clones no attempt 2, though gc.max_attempts
+// allows five.
+func TestProcessRalphCheckBlockedSubjectEndsLoop(t *testing.T) {
+	t.Parallel()
+
+	cityPath := t.TempDir()
+	checkPath := writeCheckScript(t, cityPath, "check.sh", "#!/bin/bash\nexit 0\n")
+	store, logical, run1, check1 := newSimpleRalphLoop(t, "implement", checkPath, 5)
+	if err := store.SetMetadataBatch(run1.ID, workerBlocked); err != nil {
+		t.Fatalf("stamp blocked subject: %v", err)
+	}
+	if err := store.Close(run1.ID); err != nil {
+		t.Fatalf("close run1: %v", err)
+	}
+
+	result, err := ProcessControl(store, check1, ProcessOptions{CityPath: cityPath})
+	if err != nil {
+		t.Fatalf("ProcessControl(check1): %v", err)
+	}
+	if !result.Processed || result.Action != "hard-fail" {
+		t.Fatalf("result = %+v, want processed hard-fail", result)
+	}
+	logicalAfter := mustGetBead(t, store, logical.ID)
+	if logicalAfter.Status != "closed" || logicalAfter.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomeFail {
+		t.Fatalf("logical = status %q outcome %q, want closed/fail", logicalAfter.Status, logicalAfter.Metadata[beadmeta.OutcomeMetadataKey])
+	}
+	if got := logicalAfter.Metadata[beadmeta.FailureReasonMetadataKey]; got != "parent_candidate_not_published" {
+		t.Fatalf("logical gc.failure_reason = %q, want parent_candidate_not_published", got)
+	}
+	all, err := beads.DirectMembers(store, run1.Metadata[beadmeta.RootBeadIDMetadataKey])
+	if err != nil {
+		t.Fatalf("beads.DirectMembers: %v", err)
+	}
+	for _, b := range all {
+		if b.Metadata[beadmeta.AttemptMetadataKey] == "2" {
+			t.Fatalf("a blocked subject must not clone another attempt; found %s (kind %q)", b.ID, b.Metadata[beadmeta.KindMetadataKey])
+		}
+	}
+}

@@ -542,7 +542,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   another iteration or attempt, up to `gc.max_attempts`. A step closed
   `gc.outcome=fail` with `gc.work_outcome=blocked` is now a hard failure for
   both, whatever its `gc.failure_class`: the control settles the step failed
-  and starts nothing more.
+  and starts nothing more. This holds for every ralph shape, the loop driven
+  by a `check` control included.
 
 - **A deferred workflow root now holds its steps and controls out of
   `Ready`.** Deferring a workflow's root, with or without a date, did not hold
@@ -550,7 +551,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   only the parent-child children of a parent deferred to a future date. A
   step whose blockers closed was offered to the pool while its root stayed
   deferred. Every store now leaves out a bead whose workflow root is
-  deferred, and offers it again when the root is undeferred.
+  deferred, and offers it again when the root is undeferred. An undated hold
+  set as `status=deferred` holds on the memory, file, SQLite and exec stores,
+  which keep that status as written, as it does on the bd-backed stores.
 
 - **The core `orphan-sweep` order times out a minute before its next run is
   due.** The order declared no timeout, so it ran under the 300s exec
