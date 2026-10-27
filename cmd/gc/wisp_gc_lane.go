@@ -4,10 +4,9 @@ package main
 // the tick (#2604).
 //
 // wisp_gc was a step of the serial tick, after the session reconcile. A purge
-// over a large closed-molecule corpus took 290.9s in one tick, and 15 of 22
-// runs in six hours took over two minutes, so every session decision that
-// waited for the next tick (a restart a seat requested, a drain, a spawn)
-// waited that long too. The purge decides nothing about sessions; it only
+// over a large closed-molecule corpus can run for minutes, and every session
+// decision that waited for the next tick (a restart a seat requested, a drain,
+// a spawn) waited that long too. The purge decides nothing about sessions; it only
 // deletes beads. It moves to a lane the way #5318 moved the orphan sweep and
 // the completions read: same work, same cadence state (wispGC.shouldRun), no
 // tick time.
