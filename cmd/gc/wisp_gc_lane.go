@@ -117,8 +117,8 @@ func (cr *CityRuntime) runWispGCLanePass(pressureSkips *int) {
 	completion = TraceCompletionCompleted
 }
 
-// wispGCSnapshot reads the published config and the wisp GC a reload built
-// from it, under the lock the reload writes both with.
+// wispGCSnapshot reads the published config and the wisp GC built from it,
+// under the lock publishRuntimeConfig writes both with.
 func (cr *CityRuntime) wispGCSnapshot() (*config.City, wispGC) {
 	cr.serviceStateMu.RLock()
 	defer cr.serviceStateMu.RUnlock()

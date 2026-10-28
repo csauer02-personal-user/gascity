@@ -158,7 +158,7 @@ type CityRuntime struct {
 	it                      idleTracker
 	mat                     maxSessionAgeTracker
 	adt                     assignedWorkDeferTracker
-	wg                      wispGC // read by the wisp GC lane; a reload replaces it under serviceStateMu
+	wg                      wispGC // read by the wisp GC lane; publishRuntimeConfig replaces it with cfg under serviceStateMu
 	od                      orderDispatcher
 	retiredOrderDispatchers []orderDispatcher
 	orderSet                []orders.Order
@@ -2895,10 +2895,6 @@ func (cr *CityRuntime) reloadConfigTraced(
 	cr.it = buildIdleTracker(nextCfg, cr.cityName, cr.cityPath, nextSp)
 	cr.mat = buildMaxSessionAgeTracker(nextCfg, cr.cityName, nextSp)
 	cr.adt = buildAssignedWorkDeferTracker(nextCfg, cr.cityName, nextSp)
-
-	cr.serviceStateMu.Lock()
-	cr.wg = newWispGCForConfig(nextCfg)
-	cr.serviceStateMu.Unlock()
 
 	// The new config was published above (publishRuntimeConfig), BEFORE
 	// this stage. The stage bumps the order-set generation under the lane's

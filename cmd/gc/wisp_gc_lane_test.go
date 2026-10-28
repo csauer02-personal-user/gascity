@@ -88,3 +88,35 @@ func TestWispGCLanePass_SkipsQuiescentCity(t *testing.T) {
 		t.Fatalf("pass ran wisp GC %d time(s) on a quiescent city, want 0", wg.runs)
 	}
 }
+
+// The lane reads the config and the wisp GC as a pair, and a publish replaces
+// both together, so a pass never pairs a new config with the old GC policy.
+func TestPublishRuntimeConfig_PublishesWispGCWithConfig(t *testing.T) {
+	first := &config.City{Daemon: config.DaemonConfig{WispGCInterval: "1h", WispTTL: "1h"}}
+	cr := newWispGCLaneRuntime(t, newWispGCForConfig(first))
+	cr.cfg = first
+
+	next := &config.City{Daemon: config.DaemonConfig{WispGCInterval: "2h", WispTTL: "1h"}}
+	if !cr.publishRuntimeConfig(next, cr.sp, cr.dops, "rev-2") {
+		t.Fatal("publishRuntimeConfig rejected the config")
+	}
+	cfg, wg := cr.wispGCSnapshot()
+	if cfg != next {
+		t.Fatal("snapshot config is not the published config")
+	}
+	mem, ok := wg.(*memoryWispGC)
+	if !ok {
+		t.Fatalf("snapshot wisp GC is %T, want *memoryWispGC", wg)
+	}
+	if mem.interval != 2*time.Hour {
+		t.Fatalf("snapshot wisp GC interval = %s, want 2h from the published config", mem.interval)
+	}
+
+	off := &config.City{}
+	if !cr.publishRuntimeConfig(off, cr.sp, cr.dops, "rev-3") {
+		t.Fatal("publishRuntimeConfig rejected the config")
+	}
+	if cfg, wg := cr.wispGCSnapshot(); cfg != off || wg != nil {
+		t.Fatalf("snapshot = (%p, %v), want (%p, nil) for a config with wisp GC off", cfg, wg, off)
+	}
+}
