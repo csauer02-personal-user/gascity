@@ -89,6 +89,87 @@ func TestWispGCLanePass_SkipsQuiescentCity(t *testing.T) {
 	}
 }
 
+// blockingWispGC holds its first purge until release is closed, so a test can
+// act while a pass is in flight.
+type blockingWispGC struct {
+	started  chan struct{}
+	release  chan struct{}
+	runs     atomic.Int32
+	finished atomic.Bool
+}
+
+func (b *blockingWispGC) shouldRun(time.Time) bool { return b.runs.Load() == 0 }
+
+func (b *blockingWispGC) runGC(beads.GraphStore, beads.SessionStore, beads.MailStore, time.Time) (int, error) {
+	if b.runs.Add(1) == 1 {
+		close(b.started)
+		<-b.release
+		b.finished.Store(true)
+	}
+	return 0, nil
+}
+
+// A tick completes while a purge is in flight on the lane, and stopping the
+// lane waits for that purge, so run() closes the stores and the trace only
+// after it (#2604).
+func TestWispGCLane_TickCompletesWhilePurgeBlocked(t *testing.T) {
+	wg := &blockingWispGC{started: make(chan struct{}), release: make(chan struct{})}
+	cr := newWispGCLaneRuntime(t, wg)
+	cr.cfg = &config.City{Daemon: config.DaemonConfig{PatrolInterval: "10ms"}}
+
+	stop := cr.startWispGCLane(context.Background())
+	released := false
+	defer func() {
+		if !released {
+			close(wg.release)
+			stop()
+		}
+	}()
+	select {
+	case <-wg.started:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the lane never started a purge")
+	}
+
+	tickDone := make(chan struct{})
+	go func() {
+		defer close(tickDone)
+		var dirty atomic.Bool
+		var lastProviderName string
+		var prevPoolRunning map[string]bool
+		cr.tick(context.Background(), &dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "test")
+	}()
+	select {
+	case <-tickDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the tick did not complete while the purge was blocked")
+	}
+	if wg.finished.Load() {
+		t.Fatal("the purge finished before it was released")
+	}
+
+	stopDone := make(chan struct{})
+	go func() {
+		defer close(stopDone)
+		stop()
+	}()
+	select {
+	case <-stopDone:
+		t.Fatal("stopping the lane returned while a purge was in flight")
+	case <-time.After(100 * time.Millisecond):
+	}
+	released = true
+	close(wg.release)
+	select {
+	case <-stopDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("stopping the lane did not return after the purge was released")
+	}
+	if !wg.finished.Load() {
+		t.Fatal("stopping the lane returned before the purge in flight finished")
+	}
+}
+
 // The lane reads the config and the wisp GC as a pair, and a publish replaces
 // both together, so a pass never pairs a new config with the old GC policy.
 func TestPublishRuntimeConfig_PublishesWispGCWithConfig(t *testing.T) {

@@ -32,7 +32,8 @@ const (
 
 // startWispGCLane starts the lane and returns the function that stops it and
 // waits for a pass in flight. The lane asks wispGC.shouldRun once per patrol
-// interval, which is how often the tick asked it.
+// interval. The tick also asked it on startup and event pokes, so a due purge
+// can now start up to one patrol interval later, and a poke no longer runs one.
 func (cr *CityRuntime) startWispGCLane(ctx context.Context) func() {
 	interval := cr.serviceConfigSnapshot().Daemon.PatrolIntervalDuration()
 	laneCtx, cancel := context.WithCancel(ctx)
