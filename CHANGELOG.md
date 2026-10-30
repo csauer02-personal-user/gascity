@@ -787,7 +787,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `gc.work_outcome` no longer gates readiness at all, in every store; the
   rule that exempted only a step that passed is gone. A plain work bead
   closed blocked still withholds its dependents, and control beads behind
-  one (a `drain` on its child workflow roots) are still let through.
+  one (a `drain` on its child workflow roots) are still let through, on a
+  split city too, where that root is held in another store.
 
 - **A `ralph` or `retry` no longer runs a step again after its worker closed
   it `gc.work_outcome=blocked`.** Once the control could run behind such a
