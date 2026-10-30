@@ -846,7 +846,7 @@ func IsReadyBlockingDependencyType(t string) bool {
 // open rather than newly stalling dependents it doesn't understand.
 //
 // Callers pass ReadinessWorkOutcome(dep.Metadata), not the raw gc.work_outcome,
-// so a dependency whose control-plane step passed is never vetoed.
+// so a formula step dependency is never vetoed.
 func DependencySatisfied(depStatus, depWorkOutcome string) bool {
 	if depStatus != "closed" {
 		return false
@@ -858,18 +858,22 @@ func DependencySatisfied(depStatus, depWorkOutcome string) bool {
 // closed dependency by. gc.outcome is the control-plane step result that
 // internal/dispatch sequences a workflow on, and gc.work_outcome the worker's
 // work-record disposition (ADR-0009); the two vocabularies are disjoint and can
-// disagree. A step that closed with gc.outcome=pass has already been advanced
-// past by dispatch, so letting gc.work_outcome=blocked veto its dependents
-// strands them: the graph waits on work that readiness never offers to any
-// worker. When the step passed, its work outcome does not gate readiness.
+// disagree. A formula step bead (one carrying gc.step_ref) is sequenced on
+// gc.outcome alone: a step that passed has been advanced past, and a step that
+// failed is settled by the members after it, a finalize step that reports the
+// failure, a ralph or retry that reads a blocked work outcome as a hard
+// failure, the workflow finalizer. Letting gc.work_outcome=blocked veto a
+// step's dependents strands them: the next step, a ralph iteration or a
+// workflow-step alike, is never offered to a worker, so nothing downstream
+// closes and the workflow root stays open. A step's work outcome therefore
+// never gates readiness.
 //
-// The override applies only to formula step beads (those carrying
-// gc.step_ref). A plain work bead can also carry gc.outcome=pass — the core
-// mol-do-work formula stamps it on the work bead it closes, blocked or not —
-// and there gc.outcome is not a dispatch verdict, so its blocked work outcome
-// keeps withholding dependents.
+// A plain work bead (no gc.step_ref) keeps the veto. It can also carry
+// gc.outcome=pass — the core mol-do-work formula stamps it on the work bead it
+// closes, blocked or not — and there gc.outcome is not a dispatch verdict, so
+// its blocked work outcome keeps withholding dependents.
 func ReadinessWorkOutcome(metadata map[string]string) string {
-	if metadata[beadmeta.StepRefMetadataKey] != "" && metadata[beadmeta.OutcomeMetadataKey] == beadmeta.OutcomePass {
+	if metadata[beadmeta.StepRefMetadataKey] != "" {
 		return ""
 	}
 	return metadata[beadmeta.WorkOutcomeMetadataKey]
@@ -877,16 +881,15 @@ func ReadinessWorkOutcome(metadata map[string]string) string {
 
 // WorkOutcomeGatesDependent reports whether a blocking dependency's
 // gc.work_outcome may withhold dependent from Ready. It may not when dependent
-// is a workflow control bead (beadmeta.IsControlKind). A finalizer, ralph,
-// retry or scope check reads its blockers' gc.outcome and settles the
-// workflow, a failure included. A worker that closes a failed step with
-// gc.work_outcome=blocked asks that no further work start on it. Withheld, the
-// control is never offered to the control dispatcher, and the workflow root
-// stays open with nothing left that can close it. Let through, a finalizer,
-// drain, fanout or scope check starts no further work, and a ralph or retry
-// reads the blocked work outcome as a hard failure (dispatch
-// closedWithHardFailure and classifyRetryAttempt), so it settles the step
-// failed and clones no further iteration or attempt.
+// is a workflow control bead (beadmeta.IsControlKind). A step dependency never
+// gates (ReadinessWorkOutcome); this covers the controls that block on beads
+// that are not steps, such as a drain on the child workflow roots it waits for.
+// A finalizer, drain, fanout or scope check reads its blockers' gc.outcome,
+// starts no further work and settles the workflow, a failure included; a ralph
+// or retry reads a blocked work outcome as a hard failure (dispatch
+// closedWithHardFailure and classifyRetryAttempt). Withheld, the control is
+// never offered to the control dispatcher, and the workflow root stays open
+// with nothing left that can close it.
 func WorkOutcomeGatesDependent(dependent Bead) bool {
 	return !beadmeta.IsControlKind(dependent.Metadata[beadmeta.KindMetadataKey])
 }

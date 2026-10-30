@@ -533,8 +533,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   failure and settle the workflow. Never ready, the control was never offered
   to the control dispatcher, and the workflow root stayed open with nothing
   left that could close it; a drain waiting on that root never completed.
-  The veto now applies only to dependents that are not control beads, in
-  every store; plain work behind a blocked step is still withheld.
+  The next step was stranded the same way: a finalize step written to report
+  the failure, or the iteration a `ralph` check waits on, was never offered,
+  so the ralph waited on an iteration that could not start. A formula step
+  (a bead carrying `gc.step_ref`) is sequenced on `gc.outcome`, so its
+  `gc.work_outcome` no longer gates readiness at all, in every store; the
+  rule that exempted only a step that passed is gone. A plain work bead
+  closed blocked still withholds its dependents, and control beads behind
+  one (a `drain` on its child workflow roots) are still let through.
 
 - **A `ralph` or `retry` no longer runs a step again after its worker closed
   it `gc.work_outcome=blocked`.** Once the control could run behind such a

@@ -1,10 +1,17 @@
 package dispatch
 
 import (
+	"context"
+	"errors"
+	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/molecule"
 )
 
 // workerBlocked is a worker's close of a step it could not finish and on which
@@ -191,4 +198,173 @@ func TestProcessRalphCheckBlockedSubjectEndsLoop(t *testing.T) {
 			t.Fatalf("a blocked subject must not clone another attempt; found %s (kind %q)", b.ID, b.Metadata[beadmeta.KindMetadataKey])
 		}
 	}
+}
+
+// compiledBlockedRepairFormula is the build-from-review-base tail that
+// deadlocked: a repair-review step, a finalize step under a ralph check, and a
+// publish step.
+const compiledBlockedRepairFormula = `formula = "blocked-repair-review"
+version = 2
+contract = "graph.v2"
+
+[[steps]]
+id = "repair-review"
+title = "Repair or block review findings"
+
+[[steps]]
+id = "finalize"
+title = "Finalize result"
+needs = ["repair-review"]
+
+[steps.check]
+max_attempts = 3
+
+[steps.check.check]
+mode = "exec"
+path = "` + ralphHardFailCheckScript + `"
+timeout = "30s"
+
+[[steps]]
+id = "publish"
+title = "Publish result"
+needs = ["finalize"]
+`
+
+// TestBlockedRepairReviewSettlesWorkflowOnEveryStore runs the reported shape
+// through the stores' own Ready, the predicate the controller's demand and
+// the control dispatcher read. The repair-review worker closes its step
+// gc.outcome=fail and gc.work_outcome=blocked. The finalize iteration must
+// still be offered, so the finalize worker writes its blocked report and the
+// ralph settles failed in iteration 1; the publish step runs, blocks with its
+// reason as the formula's publish does after a blocked finalize, and the
+// workflow root closes failed. No hand step: when Ready offers nothing and the root is
+// open, the workflow is deadlocked.
+func TestBlockedRepairReviewSettlesWorkflowOnEveryStore(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		open func(t *testing.T) beads.Store
+	}{
+		{"memory", func(*testing.T) beads.Store { return beads.NewMemStore() }},
+		{"file", func(t *testing.T) beads.Store {
+			s, err := beads.OpenFileStore(fsys.OSFS{}, filepath.Join(t.TempDir(), "beads.json"))
+			if err != nil {
+				t.Fatalf("OpenFileStore: %v", err)
+			}
+			return s
+		}},
+		{"sqlite", func(t *testing.T) beads.Store {
+			s, err := beads.OpenSQLiteStore(t.TempDir())
+			if err != nil {
+				t.Fatalf("OpenSQLiteStore: %v", err)
+			}
+			t.Cleanup(func() { _ = s.(*beads.SQLiteStore).CloseStore() })
+			return s
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			city := newCompiledRalphCity(t, "blocked-repair-review", compiledBlockedRepairFormula, 0)
+			store := tc.open(t)
+			cooked, err := molecule.Cook(context.Background(), store, city.name, []string{city.formulaDir}, molecule.Options{})
+			if err != nil {
+				t.Fatalf("Cook: %v", err)
+			}
+			rootID := cooked.RootID
+			closeAs := map[string]map[string]string{
+				"repair-review": workerBlocked,
+				"finalize":      workerBlocked,
+				"publish":       workerBlocked,
+			}
+			opts := ProcessOptions{CityPath: city.cityPath}
+
+			for turn := 0; ; turn++ {
+				if turn == 40 {
+					t.Fatal("workflow did not settle in 40 turns")
+				}
+				ready, err := store.Ready()
+				if err != nil {
+					t.Fatalf("Ready: %v", err)
+				}
+				slices.SortFunc(ready, func(a, b beads.Bead) int { return strings.Compare(a.ID, b.ID) })
+				acted := false
+				for _, b := range ready {
+					kind := b.Metadata[beadmeta.KindMetadataKey]
+					switch {
+					case b.ID == rootID || kind == beadmeta.KindSpec || kind == beadmeta.KindScope:
+						continue
+					case beadmeta.IsControlKind(kind):
+						result, err := ProcessControl(store, b, opts)
+						if errors.Is(err, ErrControlPending) {
+							continue
+						}
+						if err != nil {
+							t.Fatalf("ProcessControl(%s kind=%s): %v", b.ID, kind, err)
+						}
+						acted = acted || result.Processed
+					default:
+						// "blocked-repair-review.publish" or "finalize.iteration.1".
+						step, _, _ := strings.Cut(strings.TrimPrefix(b.Metadata[beadmeta.StepRefMetadataKey], city.name+"."), ".")
+						meta, ok := closeAs[step]
+						if !ok {
+							t.Fatalf("Ready offered %s (step %q, step_ref %q), which no worker plays", b.ID, step, b.Metadata[beadmeta.StepRefMetadataKey])
+						}
+						if err := updateMetadataAndClose(store, b.ID, meta); err != nil {
+							t.Fatalf("worker close %s: %v", b.ID, err)
+						}
+						acted = true
+					}
+					if acted {
+						break
+					}
+				}
+				root, err := store.Get(rootID)
+				if err != nil {
+					t.Fatalf("Get root: %v", err)
+				}
+				if root.Status == "closed" {
+					if got := root.Metadata[beadmeta.OutcomeMetadataKey]; got != beadmeta.OutcomeFail {
+						t.Fatalf("root gc.outcome = %q, want fail", got)
+					}
+					break
+				}
+				if !acted {
+					t.Fatalf("deadlock: root %s is open and Ready offers nothing to run (ready: %v)", rootID, readyRefs(ready))
+				}
+			}
+
+			members, err := store.List(beads.ListQuery{IncludeClosed: true, Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: rootID}})
+			if err != nil {
+				t.Fatalf("listing members: %v", err)
+			}
+			var ralph, iteration *beads.Bead
+			for i := range members {
+				b := &members[i]
+				ref := b.Metadata[beadmeta.StepRefMetadataKey]
+				switch {
+				case b.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindRalph:
+					ralph = b
+				case ref == "finalize.iteration.1":
+					iteration = b
+				case strings.Contains(ref, "finalize.iteration.2"):
+					t.Fatalf("a blocked finalize iteration must not clone iteration 2; found %s", b.ID)
+				}
+			}
+			if iteration == nil || iteration.Status != "closed" || iteration.Metadata[beadmeta.WorkOutcomeMetadataKey] != beadmeta.WorkOutcomeBlocked {
+				t.Fatalf("finalize iteration 1 = %+v, want closed by its worker with gc.work_outcome=blocked", iteration)
+			}
+			if ralph == nil || ralph.Status != "closed" || ralph.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomeFail ||
+				ralph.Metadata[beadmeta.FinalDispositionMetadataKey] != beadmeta.DispositionHardFail {
+				t.Fatalf("ralph = %+v, want closed fail with a hard_fail disposition", ralph)
+			}
+		})
+	}
+}
+
+func readyRefs(ready []beads.Bead) []string {
+	refs := make([]string, 0, len(ready))
+	for _, b := range ready {
+		refs = append(refs, b.ID+"="+b.Metadata[beadmeta.StepRefMetadataKey])
+	}
+	return refs
 }

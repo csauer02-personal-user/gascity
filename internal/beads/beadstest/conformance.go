@@ -963,13 +963,41 @@ func RunStoreTestsWithOptions(t *testing.T, newStore func() beads.Store, opts Op
 		}
 	})
 
-	t.Run("ReadyIncludesControlWhenBlockerStepFailedWithWorkOutcomeBlocked", func(t *testing.T) {
+	t.Run("ReadyIncludesStepDependentsWhenBlockerStepFailedWithWorkOutcomeBlocked", func(t *testing.T) {
 		s := newStore()
-		blocker, err := s.Create(beads.Bead{Title: "blocker", Type: "task"})
+		// The reported shape (gascity#8315 follow-up): a repair-review step
+		// closed failed and blocked in front of a finalize step that runs
+		// under a ralph check. The ralph waits on its iteration, so the
+		// iteration has to be offered or nothing in the workflow can settle.
+		blocker, err := s.Create(beads.Bead{Title: "repair-review", Type: "task"})
 		if err != nil {
 			t.Fatal(err)
 		}
-		work, err := s.Create(beads.Bead{Title: "work", Type: "task"})
+		ralph, err := s.Create(beads.Bead{
+			Title:    "finalize ralph",
+			Type:     "task",
+			Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindRalph, beadmeta.StepRefMetadataKey: "build.finalize"},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		iteration, err := s.Create(beads.Bead{
+			Title: "finalize iteration",
+			Type:  "task",
+			Metadata: map[string]string{
+				beadmeta.StepRefMetadataKey:       "finalize.iteration.1",
+				beadmeta.ControlForMetadataKey:    "finalize",
+				beadmeta.LogicalBeadIDMetadataKey: ralph.ID,
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		next, err := s.Create(beads.Bead{
+			Title:    "next step",
+			Type:     "task",
+			Metadata: map[string]string{beadmeta.StepRefMetadataKey: "build.report"},
+		})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -981,23 +1009,26 @@ func RunStoreTestsWithOptions(t *testing.T, newStore func() beads.Store, opts Op
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := s.DepAdd(work.ID, blocker.ID, "blocks"); err != nil {
-			t.Fatal(err)
-		}
-		if err := s.DepAdd(finalizer.ID, blocker.ID, "blocks"); err != nil {
-			t.Fatal(err)
+		for _, dep := range [][2]string{
+			{ralph.ID, blocker.ID},
+			{ralph.ID, iteration.ID},
+			{iteration.ID, blocker.ID},
+			{next.ID, blocker.ID},
+			{finalizer.ID, blocker.ID},
+		} {
+			if err := s.DepAdd(dep[0], dep[1], "blocks"); err != nil {
+				t.Fatal(err)
+			}
 		}
 		if err := s.Close(blocker.ID); err != nil {
 			t.Fatal(err)
 		}
-		// A workflow step that failed (gc.outcome=fail) and whose worker
-		// recorded gc.work_outcome=blocked. No further work may start on it,
-		// but the finalizer is the bead that settles the failed workflow: if
-		// it is withheld, the workflow root never closes.
 		if err := s.SetMetadataBatch(blocker.ID, map[string]string{
-			beadmeta.StepRefMetadataKey:     "close-source-anchor",
-			beadmeta.OutcomeMetadataKey:     beadmeta.OutcomeFail,
-			beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked,
+			beadmeta.StepRefMetadataKey:      "build.repair-review",
+			beadmeta.KindMetadataKey:         "workflow-step",
+			beadmeta.OutcomeMetadataKey:      beadmeta.OutcomeFail,
+			beadmeta.WorkOutcomeMetadataKey:  beadmeta.WorkOutcomeBlocked,
+			beadmeta.FailureClassMetadataKey: "review_repair_blocked",
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -1005,8 +1036,11 @@ func RunStoreTestsWithOptions(t *testing.T, newStore func() beads.Store, opts Op
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(got) != 1 || got[0].Title != "finalizer" {
-			t.Fatalf("Ready() = %v, want [finalizer]: a failed step with gc.work_outcome=blocked withholds further work but never the control bead that settles the workflow", titlesOf(got))
+		// A formula step is sequenced on gc.outcome; its work outcome never
+		// withholds the members after it. The ralph stays out only because
+		// its iteration is still open.
+		if titles := titlesOf(got); !hasExactly(titles, "finalize iteration", "next step", "finalizer") {
+			t.Fatalf("Ready() = %v, want [finalize iteration finalizer next step]: a formula step closed failed with gc.work_outcome=blocked must not withhold the iteration, step or control after it", titles)
 		}
 	})
 
